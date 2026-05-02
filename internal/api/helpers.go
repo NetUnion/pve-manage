@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"cloud-manage/internal/model"
+	"github.com/NetUnion/pve-manage/internal/model"
 )
 
 func (s *Server) requireUser(r *http.Request) (*model.User, error) {

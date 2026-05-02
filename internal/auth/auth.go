@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"cloud-manage/internal/config"
-	"cloud-manage/internal/model"
+	"github.com/NetUnion/pve-manage/internal/config"
+	"github.com/NetUnion/pve-manage/internal/model"
 
 	"database/sql"
 

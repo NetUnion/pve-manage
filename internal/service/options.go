@@ -1,7 +1,7 @@
 package service
 
 import (
-	"cloud-manage/internal/config"
+	"github.com/NetUnion/pve-manage/internal/config"
 )
 
 type OptionsResponse struct {

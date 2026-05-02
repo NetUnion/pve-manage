@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"time"
 
-	"cloud-manage/internal/auth"
-	"cloud-manage/internal/config"
-	"cloud-manage/internal/service"
-	"cloud-manage/internal/webui"
+	"github.com/NetUnion/pve-manage/internal/auth"
+	"github.com/NetUnion/pve-manage/internal/config"
+	"github.com/NetUnion/pve-manage/internal/service"
+	"github.com/NetUnion/pve-manage/internal/webui"
 
 	"github.com/go-chi/chi/v5"
 )

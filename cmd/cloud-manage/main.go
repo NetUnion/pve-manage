@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"cloud-manage/internal/api"
-	"cloud-manage/internal/config"
-	"cloud-manage/internal/db"
-	"cloud-manage/internal/pve"
-	"cloud-manage/internal/worker"
+	"github.com/NetUnion/pve-manage/internal/api"
+	"github.com/NetUnion/pve-manage/internal/config"
+	"github.com/NetUnion/pve-manage/internal/db"
+	"github.com/NetUnion/pve-manage/internal/pve"
+	"github.com/NetUnion/pve-manage/internal/worker"
 )
 
 func main() {

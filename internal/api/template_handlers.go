@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"cloud-manage/internal/model"
+	"github.com/NetUnion/pve-manage/internal/model"
 
 	"github.com/go-chi/chi/v5"
 )

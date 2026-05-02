@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"cloud-manage/internal/config"
-	"cloud-manage/internal/pve"
+	"github.com/NetUnion/pve-manage/internal/config"
+	"github.com/NetUnion/pve-manage/internal/pve"
 	"golang.org/x/crypto/ssh"
 )
 

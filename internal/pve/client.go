@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"cloud-manage/internal/config"
+	"github.com/NetUnion/pve-manage/internal/config"
 )
 
 const templatePoolID = "template-pool"

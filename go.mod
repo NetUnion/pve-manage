@@ -1,4 +1,4 @@
-module cloud-manage
+module github.com/NetUnion/pve-manage
 
 go 1.24.0
 
