@@ -36,6 +36,7 @@ type vmRow struct {
 	VMID                int
 	VMName              string
 	IP                  string
+	Node                string
 	Password            string
 	SSHKeysJSON         string
 	SharedUsernamesJSON string
@@ -67,6 +68,12 @@ type templateRecord struct {
 	Description  *string
 	OSType       *string
 	RealStatus   string
+}
+
+type nodeLoad struct {
+	cpuRatio float64
+	memRatio float64
+	samples  int
 }
 
 func New(logger *slog.Logger, db *sql.DB, cfg *config.App, pveClient *pve.Client) *Worker {
@@ -127,6 +134,9 @@ func (w *Worker) scanPVE(ctx context.Context) error {
 	var errs []error
 	if err := w.syncTemplates(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("templates: %w", err))
+	}
+	if err := w.syncNodeMetrics(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("node metrics: %w", err))
 	}
 	if err := w.syncUnmanagedVMs(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("existing vms: %w", err))
@@ -196,7 +206,7 @@ func (w *Worker) syncUnmanagedVMs(ctx context.Context) error {
 
 func (w *Worker) pendingVMs(ctx context.Context) ([]vmRow, error) {
 	rows, err := w.db.QueryContext(ctx, `
-		SELECT id, owner_username, cluster_key, vmid, vmname, ip, password, sshkeys_json, shared_usernames_json,
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, config_json, prefer_status_json, real_status_json,
 		       sync_state, managed, version, delete_execute_after
 		FROM vms
@@ -221,6 +231,7 @@ func (w *Worker) pendingVMs(ctx context.Context) ([]vmRow, error) {
 			&current.VMID,
 			&current.VMName,
 			&current.IP,
+			&current.Node,
 			&current.Password,
 			&current.SSHKeysJSON,
 			&current.SharedUsernamesJSON,
@@ -266,6 +277,11 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 	if !exists {
 		node, err = w.createVM(ctx, vm, prefer, cluster)
 		if err != nil {
+			return err
+		}
+	}
+	if node != "" && vm.Node != node {
+		if err := w.markNode(ctx, vm.ID, node); err != nil {
 			return err
 		}
 	}
@@ -319,7 +335,10 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 	if !found {
 		return "", fmt.Errorf("template %d not found in template-pool", templateVMID)
 	}
-	targetNode := w.chooseNode(cluster, stringFrom(prefer, "cpu_key", ""), template.Node)
+	targetNode, err := w.chooseNode(ctx, vm.ClusterKey, cluster, stringFrom(prefer, "cpu_key", ""), template.Node, intFrom(prefer, "cpu_cores"), intFrom(prefer, "memory_gb"))
+	if err != nil {
+		return "", err
+	}
 	storage := stringFrom(prefer, "storage_key", "")
 	if storage == "" {
 		return "", fmt.Errorf("storage_key is required")
@@ -645,19 +664,189 @@ func (w *Worker) removeBackups(ctx context.Context, vm vmRow) error {
 	return nil
 }
 
-func (w *Worker) chooseNode(cluster config.Cluster, cpuKey string, fallback string) string {
-	cpu, ok := cluster.CPUByKey(cpuKey)
-	if ok {
-		for _, node := range cpu.Node {
-			if node == fallback {
-				return fallback
+func (w *Worker) syncNodeMetrics(ctx context.Context) error {
+	now := timestamp()
+	var errs []error
+	for clusterKey, cluster := range w.config.Root.Cluster {
+		nodes := clusterNodes(cluster)
+		if len(nodes) == 0 {
+			continue
+		}
+		for _, node := range nodes {
+			status, err := w.pve.GetNodeStatus(ctx, clusterKey, node)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("cluster %s node %s: %w", clusterKey, node, err))
+				continue
+			}
+			if err := w.recordNodeMetric(ctx, clusterKey, node, status, now); err != nil {
+				errs = append(errs, fmt.Errorf("cluster %s node %s: %w", clusterKey, node, err))
 			}
 		}
-		if len(cpu.Node) > 0 {
-			return cpu.Node[0]
+	}
+	return errors.Join(errs...)
+}
+
+func (w *Worker) chooseNode(ctx context.Context, clusterKey string, cluster config.Cluster, cpuKey string, fallback string, requestedCores int, requestedMemoryGB int) (string, error) {
+	cpu, ok := cluster.CPUByKey(cpuKey)
+	if !ok || len(cpu.Node) == 0 {
+		return fallback, nil
+	}
+
+	candidates := uniqueStrings(cpu.Node)
+	if len(candidates) == 0 {
+		return fallback, nil
+	}
+
+	type candidate struct {
+		name     string
+		score    float64
+		cpuScore float64
+		memScore float64
+	}
+	best := candidate{score: math.Inf(1)}
+	for _, node := range candidates {
+		status, err := w.pve.GetNodeStatus(ctx, clusterKey, node)
+		if err != nil {
+			w.logger.WarnContext(ctx, "node status unavailable", "cluster", clusterKey, "node", node, "error", err)
+			continue
+		}
+		load, err := w.nodeLoad(ctx, clusterKey, node, status)
+		if err != nil {
+			w.logger.WarnContext(ctx, "node load unavailable", "cluster", clusterKey, "node", node, "error", err)
+			continue
+		}
+		score, cpuScore, memScore := scoreNodeLoad(load, status, requestedCores, requestedMemoryGB)
+		if score < best.score-1e-9 ||
+			(math.Abs(score-best.score) <= 1e-9 && (cpuScore < best.cpuScore-1e-9 ||
+				(math.Abs(cpuScore-best.cpuScore) <= 1e-9 && (memScore < best.memScore-1e-9 ||
+					(math.Abs(memScore-best.memScore) <= 1e-9 && node == fallback))))) {
+			best = candidate{name: node, score: score, cpuScore: cpuScore, memScore: memScore}
 		}
 	}
-	return fallback
+	if best.name != "" {
+		return best.name, nil
+	}
+	for _, node := range candidates {
+		if node == fallback {
+			return fallback, nil
+		}
+	}
+	return candidates[0], nil
+}
+
+func (w *Worker) nodeLoad(ctx context.Context, clusterKey, node string, fallback pve.NodeStatus) (nodeLoad, error) {
+	avg, err := w.averageNodeLoad(ctx, clusterKey, node)
+	if err == nil && avg.samples > 0 {
+		return avg, nil
+	}
+	return nodeLoad{
+		cpuRatio: nodeCPUPercent(fallback) / 100.0,
+		memRatio: nodeMemRatio(fallback),
+		samples:  1,
+	}, nil
+}
+
+func (w *Worker) averageNodeLoad(ctx context.Context, clusterKey, node string) (nodeLoad, error) {
+	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
+	var cpuAvg, memAvg sql.NullFloat64
+	var samples sql.NullInt64
+	if err := w.db.QueryRowContext(ctx, `
+		SELECT AVG(cpu_ratio), AVG(mem_ratio), COUNT(1)
+		FROM node_metrics
+		WHERE cluster_key = ? AND node = ? AND recorded_at >= ?
+	`, clusterKey, node, since).Scan(&cpuAvg, &memAvg, &samples); err != nil {
+		return nodeLoad{}, err
+	}
+	if !samples.Valid || samples.Int64 == 0 {
+		return nodeLoad{}, sql.ErrNoRows
+	}
+	load := nodeLoad{samples: int(samples.Int64)}
+	if cpuAvg.Valid {
+		load.cpuRatio = cpuAvg.Float64
+	}
+	if memAvg.Valid {
+		load.memRatio = memAvg.Float64
+	}
+	return load, nil
+}
+
+func clusterNodes(cluster config.Cluster) []string {
+	return uniqueStrings(flattenCPUNodeLists(cluster))
+}
+
+func flattenCPUNodeLists(cluster config.Cluster) []string {
+	out := make([]string, 0)
+	for _, cpu := range cluster.CPU {
+		out = append(out, cpu.Node...)
+	}
+	return out
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func nodeCPUPercent(status pve.NodeStatus) float64 {
+	if status.MaxCPU <= 0 {
+		return 0
+	}
+	return status.CPU * 100
+}
+
+func nodeMemRatio(status pve.NodeStatus) float64 {
+	if status.MaxMem <= 0 {
+		return 0
+	}
+	return float64(status.Mem) / float64(status.MaxMem)
+}
+
+func (w *Worker) recordNodeMetric(ctx context.Context, clusterKey, node string, status pve.NodeStatus, now string) error {
+	cpuRatio := nodeCPUPercent(status) / 100.0
+	memRatio := nodeMemRatio(status)
+	_, err := w.db.ExecContext(ctx, `
+		INSERT INTO node_metrics(cluster_key, node, cpu_ratio, mem_ratio, recorded_at, created_at)
+		VALUES(?,?,?,?,?,?)
+	`, clusterKey, node, cpuRatio, memRatio, now, now)
+	return err
+}
+
+func scoreNodeLoad(load nodeLoad, status pve.NodeStatus, requestedCores, requestedMemoryGB int) (score float64, cpuScore float64, memScore float64) {
+	if requestedCores <= 0 {
+		requestedCores = 1
+	}
+	if requestedMemoryGB <= 0 {
+		requestedMemoryGB = 1
+	}
+	cpuCap := float64(status.MaxCPU)
+	if cpuCap <= 0 {
+		cpuCap = 1
+	}
+	memCap := float64(status.MaxMem)
+	if memCap <= 0 {
+		memCap = 1
+	}
+	cpuScore = load.cpuRatio + float64(requestedCores)/cpuCap
+	memScore = load.memRatio + float64(requestedMemoryGB)*1024*1024*1024/memCap
+	if cpuScore > memScore {
+		score = cpuScore
+	} else {
+		score = memScore
+	}
+	return score, cpuScore, memScore
 }
 
 func (w *Worker) loadSecurityRules(ctx context.Context, owner, name string) ([]securityRule, error) {
@@ -734,9 +923,9 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 		}
 		_, err = w.db.ExecContext(ctx, `
 			UPDATE vms
-			SET vmname = ?, real_status_json = ?, sync_state = 'unmanaged', sync_error = NULL, updated_at = ?
+			SET vmname = ?, node = ?, real_status_json = ?, sync_state = 'unmanaged', sync_error = NULL, updated_at = ?
 			WHERE id = ?
-		`, name, string(real), now, id)
+		`, name, resource.Node, string(real), now, id)
 		return err
 	}
 
@@ -750,12 +939,12 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 	})
 	_, err = w.db.ExecContext(ctx, `
 		INSERT INTO vms(
-			owner_username, cluster_key, vmid, vmname, ip, password,
+			owner_username, cluster_key, vmid, vmname, ip, node, password,
 			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
 			config_json, prefer_status_json, real_status_json, sync_state, version,
 			created_at, updated_at, managed
-		) VALUES('__pve_unmanaged__',?,?,?,?,?,'[]','[]','',0,?,?,?,'unmanaged',1,?,?,0)
-	`, clusterKey, resource.VMID, name, "", "", string(cfg), string(prefer), string(real), now, now)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, "__pve_unmanaged__", clusterKey, resource.VMID, name, "", resource.Node, "", "[]", "[]", "", 0, string(cfg), string(prefer), string(real), "unmanaged", 1, now, now, 0)
 	return err
 }
 
@@ -766,6 +955,18 @@ func (w *Worker) markSynced(ctx context.Context, id int64, real map[string]any) 
 		SET real_status_json = ?, sync_state = 'synced', sync_error = NULL, updated_at = ?
 		WHERE id = ?
 	`, string(data), timestamp(), id)
+	return err
+}
+
+func (w *Worker) markNode(ctx context.Context, id int64, node string) error {
+	if node == "" {
+		return nil
+	}
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vms
+		SET node = ?, updated_at = ?
+		WHERE id = ?
+	`, node, timestamp(), id)
 	return err
 }
 

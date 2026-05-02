@@ -22,6 +22,7 @@ type VM struct {
 	VMID                int
 	VMName              string
 	IP                  string
+	Node                string
 	Password            string
 	SSHKeysJSON         string
 	SharedUsernamesJSON string

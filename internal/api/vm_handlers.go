@@ -66,6 +66,7 @@ type VM struct {
 	VMID               int             `json:"vmid"`
 	VMName             string          `json:"vmname"`
 	IP                 string          `json:"ip"`
+	Node               string          `json:"node"`
 	SSHKeys            []string        `json:"sshkeys"`
 	SharedUsernames    []string        `json:"shared_usernames"`
 	SecurityGroupName  string          `json:"security_group_name"`
@@ -130,6 +131,7 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 			VMID:               vm.VMID,
 			VMName:             vm.VMName,
 			IP:                 vm.IP,
+			Node:               vm.Node,
 			SSHKeys:            vm.SSHKeys,
 			SharedUsernames:    vm.SharedUsernames,
 			SecurityGroupName:  vm.SecurityGroupName,
@@ -386,12 +388,12 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 
 	res, err := conn.ExecContext(r.Context(), `
 		INSERT INTO vms(
-			owner_username, cluster_key, vmid, vmname, ip, password,
+			owner_username, cluster_key, vmid, vmname, ip, node, password,
 			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
 			config_json, prefer_status_json, real_status_json, sync_state, version,
 			created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',1,?,?)
-	`, current.Username, req.ClusterKey, vmid, req.VMName, ip, password, sshkeysJSON, sharedJSON, req.SecurityGroupName, uestcRestricted, string(configJSON), string(preferJSON), string(realJSON), now, now)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, current.Username, req.ClusterKey, vmid, req.VMName, ip, "", password, sshkeysJSON, sharedJSON, req.SecurityGroupName, uestcRestricted, string(configJSON), string(preferJSON), string(realJSON), "pending", 1, now, now)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -421,6 +423,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 			VMID:               vm.VMID,
 			VMName:             vm.VMName,
 			IP:                 vm.IP,
+			Node:               vm.Node,
 			SSHKeys:            vm.SSHKeys,
 			SharedUsernames:    vm.SharedUsernames,
 			SecurityGroupName:  vm.SecurityGroupName,
@@ -713,11 +716,11 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET vmname = ?, ip = ?, sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
+		SET vmname = ?, ip = ?, node = COALESCE(node, ?), sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
 		    uestc_restricted = ?, config_json = ?, prefer_status_json = ?, sync_state = 'pending',
 		    sync_error = NULL, version = version + 1, updated_at = ?
 		WHERE id = ?
-	`, vm.VMName, vm.IP, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), string(cfgBytes), string(preferBytes), now, vm.ID)
+	`, vm.VMName, vm.IP, vm.Node, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), string(cfgBytes), string(preferBytes), now, vm.ID)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return

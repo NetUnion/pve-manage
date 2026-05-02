@@ -53,6 +53,7 @@ type VM = {
   vmid: number
   vmname: string
   ip: string
+  node?: string
   sshkeys: string[]
   shared_usernames: string[]
   security_group_name: string
@@ -660,7 +661,7 @@ function renderTabs() {
 function renderVmTable() {
   const filtered = state.vms.filter((vm) => vm.managed).filter((vm) => {
     if (!state.vmFilter) return true
-    const target = `${vm.vmname} ${vm.ip} ${vm.owner_username} ${vm.cluster_key} ${vm.security_group_name}`.toLowerCase()
+    const target = `${vm.vmname} ${vm.ip} ${vm.node ?? ''} ${vm.owner_username} ${vm.cluster_key} ${vm.security_group_name}`.toLowerCase()
     return target.includes(state.vmFilter.toLowerCase())
   })
   if (!filtered.length) {
@@ -673,6 +674,7 @@ function renderVmTable() {
         <span>名称</span>
         <span>Owner</span>
         <span>Cluster</span>
+        <span>Node</span>
         <span>VMID</span>
         <span>IP</span>
         <span>SG</span>
@@ -688,6 +690,7 @@ function renderVmTable() {
                 <div class="strong vm-card-name">${escapeHtml(vm.vmname)}</div>
                 <div>${escapeHtml(vm.owner_username)}</div>
                 <div>${escapeHtml(vm.cluster_key)}</div>
+                <div>${escapeHtml(vm.node ?? 'auto')}</div>
                 <div>${vm.vmid}</div>
                 <div class="mono">${escapeHtml(vm.ip)}</div>
                 <div>${escapeHtml(vm.security_group_name)}</div>
@@ -889,7 +892,7 @@ function renderAdminVMs() {
   }
   els.adminVmTable.innerHTML = `
     <table>
-      <thead><tr><th>Name</th><th>Owner</th><th>Cluster</th><th>VMID</th><th>IP</th><th>Managed</th><th>Sync</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>Managed</th><th>Sync</th><th></th></tr></thead>
       <tbody>
         ${state.allVMs
           .map(
@@ -898,6 +901,7 @@ function renderAdminVMs() {
                 <td class="strong">${escapeHtml(vm.vmname)}</td>
                 <td>${escapeHtml(vm.owner_username)}</td>
                 <td>${escapeHtml(vm.cluster_key)}</td>
+                <td>${escapeHtml(vm.node ?? 'auto')}</td>
                 <td>${vm.vmid}</td>
                 <td class="mono">${escapeHtml(vm.ip)}</td>
                 <td>${vm.managed ? 'yes' : 'no'}</td>
@@ -1169,6 +1173,7 @@ function renderDetail(vm: VM) {
       <div><span class="label">Name</span><div>${escapeHtml(vm.vmname)}</div></div>
       <div><span class="label">Owner</span><div>${escapeHtml(vm.owner_username)}</div></div>
       <div><span class="label">Cluster</span><div>${escapeHtml(vm.cluster_key)}</div></div>
+      <div><span class="label">Node</span><div>${escapeHtml(vm.node ?? 'auto')}</div></div>
       <div><span class="label">VMID</span><div>${vm.vmid}</div></div>
       <div><span class="label">IP</span><div class="mono">${escapeHtml(vm.ip)}</div></div>
       <div><span class="label">Security Group</span><div>${escapeHtml(vm.security_group_name)}</div></div>

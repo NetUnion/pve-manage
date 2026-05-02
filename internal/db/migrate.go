@@ -160,6 +160,27 @@ CREATE TABLE IF NOT EXISTS ssh_keys (
 );
 `,
 	},
+	{
+		Version: 5,
+		Name:    "node_column_and_metrics",
+		SQL: `
+ALTER TABLE vms ADD COLUMN node TEXT;
+
+CREATE TABLE IF NOT EXISTS node_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_key TEXT NOT NULL,
+    node TEXT NOT NULL,
+    cpu_ratio REAL NOT NULL,
+    mem_ratio REAL NOT NULL,
+    recorded_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(cluster_key, node, recorded_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_node_metrics_cluster_node_recorded
+    ON node_metrics(cluster_key, node, recorded_at);
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

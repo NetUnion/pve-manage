@@ -64,6 +64,14 @@ type StorageContent struct {
 	Format string `json:"format"`
 }
 
+type NodeStatus struct {
+	Status string  `json:"status"`
+	CPU    float64 `json:"cpu"`
+	MaxCPU int     `json:"maxcpu"`
+	Mem    int64   `json:"mem"`
+	MaxMem int64   `json:"maxmem"`
+}
+
 func NewClient(logger *slog.Logger, tokens config.TokenFile) *Client {
 	return &Client{
 		logger: logger,
@@ -301,6 +309,14 @@ func (c *Client) VMStatus(ctx context.Context, clusterKey, node string, vmid int
 	var status map[string]any
 	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/status/current", url.PathEscape(node), vmid), nil, &status); err != nil {
 		return nil, err
+	}
+	return status, nil
+}
+
+func (c *Client) GetNodeStatus(ctx context.Context, clusterKey, node string) (NodeStatus, error) {
+	var status NodeStatus
+	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/status", url.PathEscape(node)), nil, &status); err != nil {
+		return NodeStatus{}, err
 	}
 	return status, nil
 }

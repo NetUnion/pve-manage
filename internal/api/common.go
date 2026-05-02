@@ -44,6 +44,7 @@ type vmSummary struct {
 	VMID               int             `json:"vmid"`
 	VMName             string          `json:"vmname"`
 	IP                 string          `json:"ip"`
+	Node               string          `json:"node"`
 	Password           string          `json:"-"`
 	SSHKeys            []string        `json:"sshkeys"`
 	SharedUsernames    []string        `json:"shared_usernames"`
@@ -515,7 +516,7 @@ type vmRowQuerier interface {
 
 func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT id, owner_username, cluster_key, vmid, vmname, ip, password, sshkeys_json, shared_usernames_json,
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
 		FROM vms
@@ -525,6 +526,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 	var item vmSummary
 	var sshkeys, shared string
 	var configRaw, preferRaw, realRaw string
+	var node sql.NullString
 	var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
 	if err := row.Scan(
 		&item.ID,
@@ -533,6 +535,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 		&item.VMID,
 		&item.VMName,
 		&item.IP,
+		&node,
 		&item.Password,
 		&sshkeys,
 		&shared,
@@ -552,6 +555,9 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 		&deleteExecuteAfter,
 	); err != nil {
 		return nil, err
+	}
+	if node.Valid {
+		item.Node = node.String
 	}
 	item.Config = rawJSONFromString(configRaw)
 	item.PreferStatus = rawJSONFromString(preferRaw)
@@ -702,7 +708,7 @@ func (s *Server) listAllVMs(ctx context.Context) ([]vmSummary, error) {
 
 func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bool) ([]vmSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, owner_username, cluster_key, vmid, vmname, ip, password, sshkeys_json, shared_usernames_json,
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
 		FROM vms
@@ -719,6 +725,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 		var item vmSummary
 		var sshkeys, shared string
 		var configRaw, preferRaw, realRaw string
+		var node sql.NullString
 		var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
 		if err := rows.Scan(
 			&item.ID,
@@ -727,6 +734,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 			&item.VMID,
 			&item.VMName,
 			&item.IP,
+			&node,
 			&item.Password,
 			&sshkeys,
 			&shared,
@@ -746,6 +754,9 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 			&deleteExecuteAfter,
 		); err != nil {
 			return nil, err
+		}
+		if node.Valid {
+			item.Node = node.String
 		}
 		item.Config = rawJSONFromString(configRaw)
 		item.PreferStatus = rawJSONFromString(preferRaw)

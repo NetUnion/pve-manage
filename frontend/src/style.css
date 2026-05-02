@@ -347,6 +347,58 @@ select {
   box-shadow: var(--shadow);
 }
 
+.vm-list {
+  min-width: 1120px;
+}
+
+.vm-list-head,
+.vm-card-main {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.3fr) 100px 120px 80px minmax(180px, 1.1fr) 120px 96px 96px 140px;
+  gap: 10px;
+  align-items: center;
+}
+
+.vm-list-head {
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(216, 224, 236, 0.9);
+  color: #475569;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  z-index: 1;
+}
+
+.vm-card {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid rgba(216, 224, 236, 0.9);
+}
+
+.vm-card:last-child {
+  border-bottom: 0;
+}
+
+.vm-card-main {
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.vm-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vm-card-actions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(216, 224, 236, 0.8);
+}
+
+.vm-card-actions .row-actions {
+  gap: 8px;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
