@@ -257,7 +257,8 @@ with_cluster_lock() {
     fi
   fi
 
-  die "another node is already running pve-sso-login-pool-provisioner"
+  log "skip: another node is already running pve-sso-login-pool-provisioner"
+  return 1
 }
 
 main() {
@@ -293,14 +294,14 @@ main() {
       [[ $# -eq 1 ]] || die "ensure requires exactly one userid"
       require_pve_tools
       with_lock
-      with_cluster_lock
+      with_cluster_lock || exit 0
       ensure_user "$1"
       ;;
     sync)
       [[ $# -eq 0 ]] || die "sync does not accept positional arguments"
       require_pve_tools
       with_lock
-      with_cluster_lock
+      with_cluster_lock || exit 0
       sync_users
       ;;
     *)
