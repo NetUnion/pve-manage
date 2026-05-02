@@ -28,7 +28,7 @@ func Handler() (http.Handler, error) {
 			_, _ = w.Write(data)
 			return
 		default:
-			http.StripPrefix("/assets/", fileServer).ServeHTTP(w, r)
+			fileServer.ServeHTTP(w, r)
 		}
 	}), nil
 }
