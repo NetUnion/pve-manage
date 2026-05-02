@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodic fallback sync for NetUnion-SSO user pool provisioning
+Documentation=man:systemd.timer(5)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=30s
+Unit=pve-sso-login-pool-provisioner.service
+
+[Install]
+WantedBy=timers.target

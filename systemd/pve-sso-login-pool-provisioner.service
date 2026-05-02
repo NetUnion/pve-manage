@@ -1,0 +1,17 @@
+[Unit]
+Description=Provision NetUnion-SSO user pools and ACLs in Proxmox VE
+Documentation=man:systemd.service(5)
+ConditionPathExists=/etc/pve/user.cfg
+After=pve-cluster.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pve-sso-login-pool-provisioner sync
+
+# Keep the cluster lock conservative. The script is normally seconds-fast; this
+# value only matters when a node dies and leaves a stale /etc/pve lock directory.
+Environment=PVE_SSO_CLUSTER_LOCK_TTL_SECONDS=600
+
+# The script already uses a node-local flock and a cluster-wide /etc/pve lock.
+# Let systemd refuse overlapping starts on the same node too.
+RemainAfterExit=no

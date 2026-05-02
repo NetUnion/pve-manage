@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch Proxmox VE user config for NetUnion-SSO user provisioning
+Documentation=man:systemd.path(5)
+After=pve-cluster.service
+ConditionPathExists=/etc/pve/user.cfg
+
+[Path]
+PathChanged=/etc/pve/user.cfg
+Unit=pve-sso-login-pool-provisioner.service
+
+[Install]
+WantedBy=multi-user.target

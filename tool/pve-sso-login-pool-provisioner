@@ -1,0 +1,295 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REALM="${PVE_SSO_REALM:-NetUnion-SSO}"
+ROLE="${PVE_SSO_ROLE:-PVEVMUser}"
+
+# Pool names intentionally use underscores as structural separators:
+#   user_<username>_pool
+# NetUnion-SSO usernames may contain hyphens, so using "-" around the username
+# would make future reverse parsing ambiguous.
+POOL_PREFIX="${PVE_SSO_POOL_PREFIX:-user_}"
+POOL_SUFFIX="${PVE_SSO_POOL_SUFFIX:-_pool}"
+
+# This is an advisory kernel lock via flock(1), not a sentinel file. A stale
+# file after a crash or reboot does not block future runs; only a live process
+# holding the lock does.
+LOCK_FILE="${PVE_SSO_LOCK_FILE:-/run/lock/pve-sso-login-pool-provisioner.lock}"
+
+# Cluster-wide lock. Every PVE node sees /etc/pve as the same cluster config
+# filesystem, and mkdir is atomic there, so only one node can create this lock
+# directory at a time. This complements LOCK_FILE, which only protects one node.
+CLUSTER_LOCK_DIR="${PVE_SSO_CLUSTER_LOCK_DIR:-/etc/pve/priv/pve-sso-login-pool-provisioner.lock.d}"
+
+# If the node holding the cluster lock dies in the middle of a run, the lock
+# directory may remain. A later run may remove it after this many seconds.
+CLUSTER_LOCK_TTL_SECONDS="${PVE_SSO_CLUSTER_LOCK_TTL_SECONDS:-600}"
+CLUSTER_LOCK_HELD=0
+DRY_RUN=0
+VERBOSE=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  pve-sso-login-pool-provisioner ensure <userid>
+  pve-sso-login-pool-provisioner sync
+
+Environment:
+  PVE_SSO_REALM        Realm to manage. Default: NetUnion-SSO
+  PVE_SSO_ROLE         Role granted on the user pool. Default: PVEVMUser
+  PVE_SSO_POOL_PREFIX  Pool name prefix. Default: user_
+  PVE_SSO_POOL_SUFFIX  Pool name suffix. Default: _pool
+  PVE_SSO_LOCK_FILE    flock lock path. Default: /run/lock/pve-sso-login-pool-provisioner.lock
+  PVE_SSO_CLUSTER_LOCK_DIR
+                       Cluster lock directory. Default: /etc/pve/priv/pve-sso-login-pool-provisioner.lock.d
+  PVE_SSO_CLUSTER_LOCK_TTL_SECONDS
+                       Seconds before a cluster lock is treated as stale. Default: 600
+
+Options:
+  -n, --dry-run        Print actions without changing PVE
+  -v, --verbose        Print skipped/already-present actions
+  -h, --help           Show this help
+EOF
+}
+
+log() {
+  printf '%s\n' "$*" >&2
+}
+
+debug() {
+  if [[ "$VERBOSE" == 1 ]]; then
+    log "$@"
+  fi
+}
+
+die() {
+  log "error: $*"
+  exit 1
+}
+
+run() {
+  if [[ "$DRY_RUN" == 1 ]]; then
+    printf 'dry-run:'
+    printf ' %q' "$@"
+    printf '\n'
+    return 0
+  fi
+
+  "$@"
+}
+
+require_pve_tools() {
+  command -v flock >/dev/null 2>&1 || die "flock not found"
+  command -v stat >/dev/null 2>&1 || die "stat not found"
+  command -v pveum >/dev/null 2>&1 || die "pveum not found; run this on a Proxmox VE node"
+  command -v pvesh >/dev/null 2>&1 || die "pvesh not found; run this on a Proxmox VE node"
+}
+
+username_from_userid() {
+  local userid="$1"
+  local suffix="@${REALM}"
+
+  # Only provision users from the configured SSO realm. Local PVE users and
+  # users from other realms are deliberately ignored during sync.
+  [[ "$userid" == *"$suffix" ]] || return 1
+  printf '%s\n' "${userid%"$suffix"}"
+}
+
+poolid_from_username() {
+  local username="$1"
+
+  # Keep this in sync with the NetUnion-SSO username policy:
+  #   3-32 chars, lowercase letters/digits/hyphens, no leading/trailing hyphen.
+  # If SSO ever lets an invalid name through, report it and skip that user
+  # instead of guessing a pool name or aborting a full sync.
+  if [[ ! "$username" =~ ^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$ ]]; then
+    log "error: invalid SSO username '$username'; expected 3-32 lowercase letters, digits, and hyphens, starting and ending with a letter or digit"
+    return 1
+  fi
+
+  printf '%s%s%s\n' "$POOL_PREFIX" "$username" "$POOL_SUFFIX"
+}
+
+pool_exists() {
+  local poolid="$1"
+  pvesh get "/pools/${poolid}" >/dev/null 2>&1
+}
+
+acl_exists() {
+  local userid="$1"
+  local path="$2"
+
+  pveum acl list 2>/dev/null | awk -v path="$path" -v userid="$userid" -v role="$ROLE" '
+    $1 == path && $2 == userid && $3 == role { found = 1 }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+ensure_user() {
+  local userid="$1"
+  local username poolid path
+
+  username="$(username_from_userid "$userid")" || {
+    debug "skip $userid: not in realm $REALM"
+    return 0
+  }
+
+  poolid="$(poolid_from_username "$username")" || return 0
+  path="/pool/${poolid}"
+
+  # Both operations below are intentionally idempotent. The script may be
+  # invoked by a file watcher, timer, or manual operator action, and repeated
+  # runs should converge on the same PVE state without duplicating entries.
+  if pool_exists "$poolid"; then
+    debug "pool exists: $poolid"
+  else
+    log "create pool: $poolid"
+    run pvesh create /pools -poolid "$poolid"
+  fi
+
+  if acl_exists "$userid" "$path"; then
+    debug "acl exists: $path $userid $ROLE"
+  else
+    log "grant acl: $path user=$userid role=$ROLE"
+    run pveum acl modify "$path" -user "$userid" -role "$ROLE"
+  fi
+}
+
+sync_users() {
+  require_pve_tools
+
+  # PVE exposes users as JSON, so parse it as JSON instead of scraping columns.
+  # This avoids surprises if display formatting changes between PVE versions.
+  pveum user list --output-format json |
+    perl -MJSON::PP -0777 -ne '
+      my $users = decode_json($_);
+      for my $user (@$users) {
+        print $user->{userid}, "\n" if defined $user->{userid};
+      }
+    ' |
+    while IFS= read -r userid; do
+      ensure_user "$userid"
+    done
+}
+
+with_lock() {
+  local lock_dir
+
+  lock_dir="$(dirname "$LOCK_FILE")"
+  [[ -d "$lock_dir" ]] || die "lock directory does not exist: $lock_dir"
+
+  # Non-blocking lock: if a previous sync is still running, fail immediately.
+  # systemd/cron can record or notify on that failure instead of stacking up
+  # concurrent PVE config writes.
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    die "another pve-sso-login-pool-provisioner process is already running"
+  fi
+}
+
+release_cluster_lock() {
+  if [[ "$CLUSTER_LOCK_HELD" == 1 ]]; then
+    rm -f "${CLUSTER_LOCK_DIR}/owner" 2>/dev/null || true
+    rmdir "$CLUSTER_LOCK_DIR" 2>/dev/null || true
+    CLUSTER_LOCK_HELD=0
+  fi
+}
+
+write_cluster_lock_owner() {
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'node=%s\n' "$(hostname)"
+    printf 'created_at=%s\n' "$(date -Is)"
+  } >"${CLUSTER_LOCK_DIR}/owner"
+}
+
+cluster_lock_is_stale() {
+  local now lock_mtime lock_age
+
+  now="$(date +%s)"
+  lock_mtime="$(stat -c %Y "$CLUSTER_LOCK_DIR" 2>/dev/null)" || return 1
+  lock_age=$((now - lock_mtime))
+
+  [[ "$lock_age" -gt "$CLUSTER_LOCK_TTL_SECONDS" ]]
+}
+
+with_cluster_lock() {
+  local cluster_lock_parent
+
+  cluster_lock_parent="$(dirname "$CLUSTER_LOCK_DIR")"
+  [[ -d "$cluster_lock_parent" ]] || die "cluster lock parent directory does not exist: $cluster_lock_parent"
+
+  if mkdir "$CLUSTER_LOCK_DIR" 2>/dev/null; then
+    CLUSTER_LOCK_HELD=1
+    write_cluster_lock_owner
+    trap release_cluster_lock EXIT
+    return 0
+  fi
+
+  if cluster_lock_is_stale; then
+    log "warning: removing stale cluster lock older than ${CLUSTER_LOCK_TTL_SECONDS}s: $CLUSTER_LOCK_DIR"
+    rm -f "${CLUSTER_LOCK_DIR}/owner"
+    rmdir "$CLUSTER_LOCK_DIR" 2>/dev/null || die "cluster lock is stale but could not be removed: $CLUSTER_LOCK_DIR"
+
+    if mkdir "$CLUSTER_LOCK_DIR" 2>/dev/null; then
+      CLUSTER_LOCK_HELD=1
+      write_cluster_lock_owner
+      trap release_cluster_lock EXIT
+      return 0
+    fi
+  fi
+
+  die "another node is already running pve-sso-login-pool-provisioner"
+}
+
+main() {
+  local command=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n|--dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      -v|--verbose)
+        VERBOSE=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      ensure|sync)
+        command="$1"
+        shift
+        break
+        ;;
+      *)
+        die "unknown argument: $1"
+        ;;
+    esac
+  done
+
+  case "$command" in
+    ensure)
+      [[ $# -eq 1 ]] || die "ensure requires exactly one userid"
+      require_pve_tools
+      with_lock
+      with_cluster_lock
+      ensure_user "$1"
+      ;;
+    sync)
+      [[ $# -eq 0 ]] || die "sync does not accept positional arguments"
+      require_pve_tools
+      with_lock
+      with_cluster_lock
+      sync_users
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
