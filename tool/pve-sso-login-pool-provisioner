@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REALM="${PVE_SSO_REALM:-NetUnion-SSO}"
-ROLE="${PVE_SSO_ROLE:-PVEVMUser}"
+ROLES="${PVE_SSO_ROLES:-PVEVMUser PVEPoolUser}"
 
 # Pool names intentionally use underscores as structural separators:
 #   user_<username>_pool
@@ -36,7 +36,8 @@ Usage:
 
 Environment:
   PVE_SSO_REALM        Realm to manage. Default: NetUnion-SSO
-  PVE_SSO_ROLE         Role granted on the user pool. Default: PVEVMUser
+  PVE_SSO_ROLES        Space-separated roles granted on the user pool.
+                       Default: PVEVMUser PVEPoolUser
   PVE_SSO_POOL_PREFIX  Pool name prefix. Default: user_
   PVE_SSO_POOL_SUFFIX  Pool name suffix. Default: _pool
   PVE_SSO_LOCK_FILE    flock lock path. Default: /run/lock/pve-sso-login-pool-provisioner.lock
@@ -118,6 +119,7 @@ pool_exists() {
 acl_exists() {
   local userid="$1"
   local path="$2"
+  local role="$3"
 
   # PVE's human-readable ACL table is not stable enough to parse by column
   # number. Use JSON and accept the common field names used by pveum/pvesh.
@@ -136,12 +138,12 @@ acl_exists() {
       }
 
       exit 1;
-    ' "$path" "$userid" "$ROLE"
+    ' "$path" "$userid" "$role"
 }
 
 ensure_user() {
   local userid="$1"
-  local username poolid path
+  local username poolid path role
 
   username="$(username_from_userid "$userid")" || {
     debug "skip $userid: not in realm $REALM"
@@ -161,12 +163,14 @@ ensure_user() {
     run pvesh create /pools -poolid "$poolid"
   fi
 
-  if acl_exists "$userid" "$path"; then
-    debug "acl exists: $path $userid $ROLE"
-  else
-    log "grant acl: $path user=$userid role=$ROLE"
-    run pveum acl modify "$path" -user "$userid" -role "$ROLE"
-  fi
+  for role in $ROLES; do
+    if acl_exists "$userid" "$path" "$role"; then
+      debug "acl exists: $path $userid $role"
+    else
+      log "grant acl: $path user=$userid role=$role"
+      run pveum acl modify "$path" -user "$userid" -role "$role"
+    fi
+  done
 }
 
 sync_users() {
