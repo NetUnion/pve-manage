@@ -1,0 +1,828 @@
+package worker
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"cloud-manage/internal/config"
+	"cloud-manage/internal/pve"
+)
+
+type Worker struct {
+	logger           *slog.Logger
+	db               *sql.DB
+	config           *config.App
+	pve              *pve.Client
+	lastTemplateScan time.Time
+}
+
+type vmRow struct {
+	ID                  int64
+	OwnerUsername       string
+	ClusterKey          string
+	VMID                int
+	VMName              string
+	IP                  string
+	Password            string
+	SSHKeysJSON         string
+	SharedUsernamesJSON string
+	SecurityGroupName   string
+	UESTCRestricted     bool
+	ConfigJSON          string
+	PreferStatusJSON    string
+	RealStatusJSON      string
+	SyncState           string
+	Managed             bool
+	Version             int
+	DeleteExecuteAfter  sql.NullString
+}
+
+type securityRule struct {
+	Direction string `json:"direction"`
+	Action    string `json:"action"`
+	Ethertype string `json:"ethertype"`
+	Protocol  string `json:"protocol"`
+	CIDR      string `json:"cidr"`
+	PortStart *int   `json:"port_start"`
+	PortEnd   *int   `json:"port_end"`
+}
+
+type templateRecord struct {
+	ClusterKey   string
+	TemplateVMID int
+	Name         string
+	Description  *string
+	OSType       *string
+	RealStatus   string
+}
+
+func New(logger *slog.Logger, db *sql.DB, cfg *config.App, pveClient *pve.Client) *Worker {
+	return &Worker{
+		logger: logger,
+		db:     db,
+		config: cfg,
+		pve:    pveClient,
+	}
+}
+
+func (w *Worker) Run(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	w.logger.Info("worker started")
+
+	for {
+		if err := w.syncOnce(ctx); err != nil {
+			w.logger.Error("worker sync failed", "error", err)
+		}
+
+		select {
+		case <-ctx.Done():
+			w.logger.Info("worker stopped")
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (w *Worker) syncOnce(ctx context.Context) error {
+	if time.Since(w.lastTemplateScan) > time.Minute {
+		if err := w.scanPVE(ctx); err != nil {
+			w.logger.WarnContext(ctx, "pve scan failed", "error", err)
+		} else {
+			w.lastTemplateScan = time.Now()
+		}
+	}
+
+	items, err := w.pendingVMs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := w.syncVM(ctx, item); err != nil {
+			w.logger.ErrorContext(ctx, "sync vm failed", "id", item.ID, "cluster", item.ClusterKey, "vmid", item.VMID, "error", err)
+			if updateErr := w.markFailed(ctx, item.ID, err.Error()); updateErr != nil {
+				w.logger.ErrorContext(ctx, "update failed vm state", "id", item.ID, "error", updateErr)
+			}
+			continue
+		}
+	}
+	return nil
+}
+
+func (w *Worker) scanPVE(ctx context.Context) error {
+	var errs []error
+	if err := w.syncTemplates(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("templates: %w", err))
+	}
+	if err := w.syncUnmanagedVMs(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("existing vms: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+func (w *Worker) syncTemplates(ctx context.Context) error {
+	now := timestamp()
+	for clusterKey := range w.config.Root.Cluster {
+		templates, err := w.pve.ListTemplates(ctx, clusterKey)
+		if err != nil {
+			return fmt.Errorf("cluster %s: %w", clusterKey, err)
+		}
+		for _, tpl := range templates {
+			real, _ := json.Marshal(map[string]any{
+				"node":          tpl.Node,
+				"template_vmid": tpl.VMID,
+				"config":        tpl.Config,
+				"last_seen_at":  now,
+			})
+			name := tpl.Name
+			if name == "" {
+				name = fmt.Sprintf("template-%d", tpl.VMID)
+			}
+			var osType *string
+			if tpl.OSType != "" {
+				osType = &tpl.OSType
+			}
+			record := templateRecord{
+				ClusterKey:   clusterKey,
+				TemplateVMID: tpl.VMID,
+				Name:         name,
+				OSType:       osType,
+				RealStatus:   string(real),
+			}
+			if err := w.upsertTemplate(ctx, record, now); err != nil {
+				return err
+			}
+		}
+		w.logger.InfoContext(ctx, "templates scanned", "cluster", clusterKey, "count", len(templates))
+	}
+	return nil
+}
+
+func (w *Worker) syncUnmanagedVMs(ctx context.Context) error {
+	now := timestamp()
+	for clusterKey := range w.config.Root.Cluster {
+		resources, err := w.pve.ListVMResources(ctx, clusterKey)
+		if err != nil {
+			return fmt.Errorf("cluster %s: %w", clusterKey, err)
+		}
+		count := 0
+		for _, resource := range resources {
+			if resource.Type != "qemu" || resource.VMID <= 0 {
+				continue
+			}
+			if err := w.upsertUnmanagedVM(ctx, clusterKey, resource, now); err != nil {
+				return err
+			}
+			count++
+		}
+		w.logger.InfoContext(ctx, "existing pve vms scanned", "cluster", clusterKey, "count", count)
+	}
+	return nil
+}
+
+func (w *Worker) pendingVMs(ctx context.Context) ([]vmRow, error) {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, password, sshkeys_json, shared_usernames_json,
+		       security_group_name, uestc_restricted, config_json, prefer_status_json, real_status_json,
+		       sync_state, managed, version, delete_execute_after
+		FROM vms
+		WHERE deleted_at IS NULL
+		  AND managed = 1
+		  AND sync_state IN ('pending', 'failed', 'deleting')
+		ORDER BY updated_at, id
+		LIMIT 20
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]vmRow, 0)
+	for rows.Next() {
+		var current vmRow
+		if err := rows.Scan(
+			&current.ID,
+			&current.OwnerUsername,
+			&current.ClusterKey,
+			&current.VMID,
+			&current.VMName,
+			&current.IP,
+			&current.Password,
+			&current.SSHKeysJSON,
+			&current.SharedUsernamesJSON,
+			&current.SecurityGroupName,
+			&current.UESTCRestricted,
+			&current.ConfigJSON,
+			&current.PreferStatusJSON,
+			&current.RealStatusJSON,
+			&current.SyncState,
+			&current.Managed,
+			&current.Version,
+			&current.DeleteExecuteAfter,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, current)
+	}
+	return items, rows.Err()
+}
+
+func (w *Worker) syncVM(ctx context.Context, vm vmRow) error {
+	var prefer map[string]any
+	if err := json.Unmarshal([]byte(vm.PreferStatusJSON), &prefer); err != nil {
+		return fmt.Errorf("invalid prefer_status_json: %w", err)
+	}
+
+	intent, _ := prefer["intent"].(string)
+	if intent == "delete_pending" || vm.SyncState == "deleting" {
+		return w.syncDelete(ctx, vm, prefer)
+	}
+	return w.syncPresent(ctx, vm, prefer)
+}
+
+func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]any) error {
+	cluster, ok := w.config.Root.Cluster[vm.ClusterKey]
+	if !ok {
+		return fmt.Errorf("unknown cluster %s", vm.ClusterKey)
+	}
+	node, exists, err := w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		node, err = w.createVM(ctx, vm, prefer, cluster)
+		if err != nil {
+			return err
+		}
+	}
+	if err := w.ensurePoolMembership(ctx, vm); err != nil {
+		return err
+	}
+	if err := w.configureVM(ctx, vm, prefer, cluster, node); err != nil {
+		return err
+	}
+	if err := w.applyPower(ctx, vm, node, stringFrom(prefer, "power", "running")); err != nil {
+		return err
+	}
+	status, _ := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
+	power, _ := status["status"].(string)
+	if power == "" {
+		power = stringFrom(prefer, "power", "unknown")
+	}
+	return w.markSynced(ctx, vm.ID, map[string]any{
+		"intent":         "present",
+		"power":          power,
+		"vmid":           vm.VMID,
+		"node":           node,
+		"ip":             vm.IP,
+		"last_synced_at": timestamp(),
+	})
+}
+
+func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, cluster config.Cluster) (string, error) {
+	templateVMID := intFrom(prefer, "template_vmid")
+	if templateVMID <= 0 {
+		return "", fmt.Errorf("template_vmid is required")
+	}
+	templates, err := w.pve.ListTemplates(ctx, vm.ClusterKey)
+	if err != nil {
+		return "", err
+	}
+	var template pve.Template
+	found := false
+	for _, tpl := range templates {
+		if tpl.VMID == templateVMID {
+			template = tpl
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("template %d not found in template-pool", templateVMID)
+	}
+	targetNode := w.chooseNode(cluster, stringFrom(prefer, "cpu_key", ""), template.Node)
+	storage := stringFrom(prefer, "storage_key", "")
+	if storage == "" {
+		return "", fmt.Errorf("storage_key is required")
+	}
+	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, targetNode, vm.VMID, vm.VMName, storage); err != nil {
+		return "", err
+	}
+	if node, ok, err := w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID); err != nil {
+		return "", err
+	} else if ok {
+		return node, nil
+	}
+	if targetNode != "" {
+		return targetNode, nil
+	}
+	return template.Node, nil
+}
+
+func (w *Worker) ensurePoolMembership(ctx context.Context, vm vmRow) error {
+	poolID := userPoolID(vm.OwnerUsername)
+	if err := w.pve.EnsurePool(ctx, vm.ClusterKey, poolID); err != nil {
+		return err
+	}
+	return w.pve.SetPoolVMs(ctx, vm.ClusterKey, poolID, vm.VMID)
+}
+
+func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]any, cluster config.Cluster, node string) error {
+	bridgeKey := stringFrom(prefer, "bridge_key", "custom")
+	bridge, ok := cluster.BridgeByKey(bridgeKey)
+	if !ok {
+		return fmt.Errorf("unknown bridge %s", bridgeKey)
+	}
+	cfg, err := w.pve.GetVMConfig(ctx, vm.ClusterKey, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	params := url.Values{
+		"name":       {vm.VMName},
+		"cores":      {strconv.Itoa(intFrom(prefer, "cpu_cores"))},
+		"memory":     {strconv.Itoa(intFrom(prefer, "memory_gb") * 1024)},
+		"ciuser":     {"root"},
+		"cipassword": {vm.Password},
+		"ipconfig0":  {fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway)},
+		"agent":      {"enabled=1"},
+	}
+	sshKeys := parseJSONStrings(vm.SSHKeysJSON)
+	if len(sshKeys) > 0 {
+		params.Set("sshkeys", strings.Join(sshKeys, "\n"))
+	}
+	if net0 := rewriteNet0(cfg["net0"], bridgeKey); net0 != "" {
+		params.Set("net0", net0)
+	}
+	if err := w.pve.SetVMConfig(ctx, vm.ClusterKey, node, vm.VMID, params); err != nil {
+		return err
+	}
+	if err := w.resizeDisk(ctx, vm, prefer, cfg, node); err != nil {
+		return err
+	}
+	return w.syncFirewall(ctx, vm, prefer, bridge, node)
+}
+
+func (w *Worker) resizeDisk(ctx context.Context, vm vmRow, prefer map[string]any, cfg map[string]any, node string) error {
+	targetGB := intFrom(prefer, "disk_gb")
+	if targetGB <= 0 {
+		return fmt.Errorf("disk_gb is required")
+	}
+	currentGB := diskGB(cfg["scsi0"])
+	if currentGB == 0 {
+		return fmt.Errorf("cannot determine current scsi0 size")
+	}
+	if targetGB < currentGB {
+		return fmt.Errorf("disk resize cannot shrink: current=%dGB target=%dGB", currentGB, targetGB)
+	}
+	return w.pve.ResizeDisk(ctx, vm.ClusterKey, node, vm.VMID, "scsi0", targetGB-currentGB)
+}
+
+func (w *Worker) syncFirewall(ctx context.Context, vm vmRow, prefer map[string]any, bridge config.BridgeConfig, node string) error {
+	rules, err := w.loadSecurityRules(ctx, vm.OwnerUsername, vm.SecurityGroupName)
+	if err != nil {
+		return err
+	}
+	groupName := fmt.Sprintf("user_%s_%s", vm.OwnerUsername, vm.SecurityGroupName)
+	groups := []string{groupName}
+	if boolFrom(prefer, "uestc_restricted") && w.config.Root.Cluster[vm.ClusterKey].Network.UESTC != "" {
+		groups = append([]string{w.config.Root.Cluster[vm.ClusterKey].Network.UESTC}, groups...)
+	}
+	ipfilter := append([]string{exactIPv4CIDR(vm.IP)}, bridge.IPFilter...)
+	spec := pve.FirewallSpec{
+		UserGroupName: groupName,
+		Rules:         convertRules(rules),
+		IPFilter:      ipfilter,
+		Groups:        groups,
+	}
+	return w.pve.EnsureFirewall(ctx, vm.ClusterKey, node, vm.VMID, spec)
+}
+
+func (w *Worker) applyPower(ctx context.Context, vm vmRow, node string, power string) error {
+	switch power {
+	case "running":
+		return w.pve.StartVM(ctx, vm.ClusterKey, node, vm.VMID)
+	case "stopped":
+		return w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID)
+	case "reboot":
+		return w.pve.RebootVM(ctx, vm.ClusterKey, node, vm.VMID)
+	case "", "unknown":
+		return nil
+	default:
+		return fmt.Errorf("unknown power %q", power)
+	}
+}
+
+func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any) error {
+	node, exists, err := w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return w.markDeleted(ctx, vm.ID)
+	}
+	if err := w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
+		w.logger.WarnContext(ctx, "shutdown before delete failed", "id", vm.ID, "error", err)
+	}
+	execAt := vm.DeleteExecuteAfter.String
+	if execAt == "" {
+		execAt, _ = prefer["delete_execute_after"].(string)
+	}
+	deleteAt, err := parseTime(execAt)
+	if err != nil {
+		return fmt.Errorf("invalid delete_execute_after: %w", err)
+	}
+	if time.Now().Before(deleteAt) {
+		return w.markDeletePending(ctx, vm.ID, map[string]any{
+			"intent":               "delete_pending",
+			"power":                "stopped",
+			"node":                 node,
+			"vmid":                 vm.VMID,
+			"delete_execute_after": deleteAt.Format(time.RFC3339Nano),
+			"last_synced_at":       timestamp(),
+		})
+	}
+	if err := w.cleanupDeletionArtifacts(ctx, vm, node); err != nil {
+		return err
+	}
+	if err := w.pve.DeleteVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
+		return err
+	}
+	return w.markDeleted(ctx, vm.ID)
+}
+
+func (w *Worker) cleanupDeletionArtifacts(ctx context.Context, vm vmRow, node string) error {
+	if err := w.removeSnapshots(ctx, vm, node); err != nil {
+		return err
+	}
+	if err := w.removeBackups(ctx, vm); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *Worker) removeSnapshots(ctx context.Context, vm vmRow, node string) error {
+	snaps, err := w.pve.ListVMSnapshots(ctx, vm.ClusterKey, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	for _, snap := range snaps {
+		if snap.Name == "" || snap.Name == "current" {
+			continue
+		}
+		if err := w.pve.DeleteVMSnapshot(ctx, vm.ClusterKey, node, vm.VMID, snap.Name); err != nil {
+			return fmt.Errorf("delete snapshot %s: %w", snap.Name, err)
+		}
+	}
+	return nil
+}
+
+func (w *Worker) removeBackups(ctx context.Context, vm vmRow) error {
+	cluster, ok := w.config.Root.Cluster[vm.ClusterKey]
+	if !ok {
+		return fmt.Errorf("unknown cluster %s", vm.ClusterKey)
+	}
+	for storageKey := range cluster.Storage {
+		items, err := w.pve.ListStorageContent(ctx, vm.ClusterKey, storageKey, vm.VMID, "backup")
+		if err != nil {
+			if isIgnorableBackupScanError(err) {
+				continue
+			}
+			return fmt.Errorf("storage %s: %w", storageKey, err)
+		}
+		for _, item := range items {
+			if item.VMID != vm.VMID || item.VolID == "" {
+				continue
+			}
+			if err := w.pve.DeleteStorageContent(ctx, vm.ClusterKey, storageKey, item.VolID); err != nil {
+				return fmt.Errorf("delete backup %s/%s: %w", storageKey, item.VolID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (w *Worker) chooseNode(cluster config.Cluster, cpuKey string, fallback string) string {
+	cpu, ok := cluster.CPUByKey(cpuKey)
+	if ok {
+		for _, node := range cpu.Node {
+			if node == fallback {
+				return fallback
+			}
+		}
+		if len(cpu.Node) > 0 {
+			return cpu.Node[0]
+		}
+	}
+	return fallback
+}
+
+func (w *Worker) loadSecurityRules(ctx context.Context, owner, name string) ([]securityRule, error) {
+	var raw string
+	if err := w.db.QueryRowContext(ctx, `
+		SELECT rules_json
+		FROM security_groups
+		WHERE owner_username = ? AND name = ?
+	`, owner, name).Scan(&raw); err != nil {
+		return nil, err
+	}
+	var rules []securityRule
+	if err := json.Unmarshal([]byte(raw), &rules); err != nil {
+		return nil, err
+	}
+	return rules, nil
+}
+
+func (w *Worker) upsertTemplate(ctx context.Context, tpl templateRecord, now string) error {
+	var id int64
+	err := w.db.QueryRowContext(ctx, `
+		SELECT id
+		FROM templates
+		WHERE cluster_key = ? AND template_vmid = ?
+	`, tpl.ClusterKey, tpl.TemplateVMID).Scan(&id)
+	if err == sql.ErrNoRows {
+		_, err = w.db.ExecContext(ctx, `
+			INSERT INTO templates(cluster_key, template_vmid, name, description, os_type, real_status_json, last_seen_at, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,?,?,?)
+		`, tpl.ClusterKey, tpl.TemplateVMID, tpl.Name, tpl.Description, tpl.OSType, tpl.RealStatus, now, now, now)
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	_, err = w.db.ExecContext(ctx, `
+		UPDATE templates
+		SET name = ?, description = ?, os_type = ?, real_status_json = ?, last_seen_at = ?, updated_at = ?
+		WHERE id = ?
+	`, tpl.Name, tpl.Description, tpl.OSType, tpl.RealStatus, now, now, id)
+	return err
+}
+
+func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resource pve.Resource, now string) error {
+	var id int64
+	var managed bool
+	err := w.db.QueryRowContext(ctx, `
+		SELECT id, managed
+		FROM vms
+		WHERE cluster_key = ? AND vmid = ? AND deleted_at IS NULL
+	`, clusterKey, resource.VMID).Scan(&id, &managed)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	name := resource.Name
+	if name == "" {
+		name = fmt.Sprintf("pve-%d", resource.VMID)
+	}
+	real, _ := json.Marshal(map[string]any{
+		"intent":          "unmanaged",
+		"power":           resource.Status,
+		"node":            resource.Node,
+		"vmid":            resource.VMID,
+		"name":            name,
+		"last_seen_at":    now,
+		"source":          "pve-scan",
+		"pve_resource_id": resource.ID,
+	})
+
+	if err == nil {
+		if managed {
+			return nil
+		}
+		_, err = w.db.ExecContext(ctx, `
+			UPDATE vms
+			SET vmname = ?, real_status_json = ?, sync_state = 'unmanaged', sync_error = NULL, updated_at = ?
+			WHERE id = ?
+		`, name, string(real), now, id)
+		return err
+	}
+
+	cfg, _ := json.Marshal(map[string]any{
+		"source": "pve-scan",
+		"node":   resource.Node,
+		"name":   name,
+	})
+	prefer, _ := json.Marshal(map[string]any{
+		"intent": "unmanaged",
+	})
+	_, err = w.db.ExecContext(ctx, `
+		INSERT INTO vms(
+			owner_username, cluster_key, vmid, vmname, ip, password,
+			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
+			config_json, prefer_status_json, real_status_json, sync_state, version,
+			created_at, updated_at, managed
+		) VALUES('__pve_unmanaged__',?,?,?,?,?,'[]','[]','',0,?,?,?,'unmanaged',1,?,?,0)
+	`, clusterKey, resource.VMID, name, "", "", string(cfg), string(prefer), string(real), now, now)
+	return err
+}
+
+func (w *Worker) markSynced(ctx context.Context, id int64, real map[string]any) error {
+	data, _ := json.Marshal(real)
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vms
+		SET real_status_json = ?, sync_state = 'synced', sync_error = NULL, updated_at = ?
+		WHERE id = ?
+	`, string(data), timestamp(), id)
+	return err
+}
+
+func (w *Worker) markDeletePending(ctx context.Context, id int64, real map[string]any) error {
+	data, _ := json.Marshal(real)
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vms
+		SET real_status_json = ?, sync_state = 'deleting', sync_error = NULL, updated_at = ?
+		WHERE id = ?
+	`, string(data), timestamp(), id)
+	return err
+}
+
+func (w *Worker) markFailed(ctx context.Context, id int64, message string) error {
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vms
+		SET sync_state = 'failed', sync_error = ?, updated_at = ?
+		WHERE id = ?
+	`, message, timestamp(), id)
+	return err
+}
+
+func (w *Worker) markDeleted(ctx context.Context, id int64) error {
+	now := timestamp()
+	real, _ := json.Marshal(map[string]any{
+		"intent":         "absent",
+		"power":          "deleted",
+		"last_synced_at": now,
+	})
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vms
+		SET deleted_at = ?, real_status_json = ?, sync_state = 'synced', sync_error = NULL, updated_at = ?
+		WHERE id = ?
+	`, now, string(real), now, id)
+	return err
+}
+
+func parseJSONStrings(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	_ = json.Unmarshal([]byte(raw), &out)
+	return out
+}
+
+func convertRules(rules []securityRule) []pve.SecurityRule {
+	out := make([]pve.SecurityRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, pve.SecurityRule{
+			Direction: rule.Direction,
+			Action:    rule.Action,
+			Ethertype: rule.Ethertype,
+			Protocol:  rule.Protocol,
+			CIDR:      rule.CIDR,
+			PortStart: rule.PortStart,
+			PortEnd:   rule.PortEnd,
+		})
+	}
+	return out
+}
+
+func stringFrom(obj map[string]any, key, fallback string) string {
+	if v, ok := obj[key].(string); ok && v != "" {
+		return v
+	}
+	return fallback
+}
+
+func intFrom(obj map[string]any, key string) int {
+	v, ok := obj[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		i, _ := strconv.Atoi(n)
+		return i
+	default:
+		return 0
+	}
+}
+
+func boolFrom(obj map[string]any, key string) bool {
+	v, ok := obj[key]
+	if !ok {
+		return false
+	}
+	switch b := v.(type) {
+	case bool:
+		return b
+	case float64:
+		return b != 0
+	case string:
+		return b == "1" || strings.EqualFold(b, "true") || strings.EqualFold(b, "yes")
+	default:
+		return false
+	}
+}
+
+func rewriteNet0(raw any, bridge string) string {
+	current, _ := raw.(string)
+	if current == "" {
+		return ""
+	}
+	parts := strings.Split(current, ",")
+	seenBridge := false
+	seenFirewall := false
+	for i, part := range parts {
+		if strings.HasPrefix(part, "bridge=") {
+			parts[i] = "bridge=" + bridge
+			seenBridge = true
+		}
+		if strings.HasPrefix(part, "firewall=") {
+			parts[i] = "firewall=1"
+			seenFirewall = true
+		}
+	}
+	if !seenBridge {
+		parts = append(parts, "bridge="+bridge)
+	}
+	if !seenFirewall {
+		parts = append(parts, "firewall=1")
+	}
+	return strings.Join(parts, ",")
+}
+
+var sizeRE = regexp.MustCompile(`size=([0-9]+)([KMGTP]?)`)
+
+func diskGB(raw any) int {
+	value, _ := raw.(string)
+	match := sizeRE.FindStringSubmatch(value)
+	if len(match) != 3 {
+		return 0
+	}
+	n, _ := strconv.Atoi(match[1])
+	switch strings.ToUpper(match[2]) {
+	case "T":
+		return n * 1024
+	case "G", "":
+		return n
+	case "M":
+		if n%1024 == 0 {
+			return n / 1024
+		}
+		return n/1024 + 1
+	default:
+		return 0
+	}
+}
+
+func exactIPv4CIDR(ipWithCIDR string) string {
+	ip, _, err := net.ParseCIDR(ipWithCIDR)
+	if err != nil {
+		ip = net.ParseIP(strings.Split(ipWithCIDR, "/")[0])
+	}
+	if ip == nil {
+		return ipWithCIDR
+	}
+	return ip.String() + "/32"
+}
+
+func parseTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, fmt.Errorf("empty time")
+	}
+	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, value)
+}
+
+func timestamp() string {
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+func isIgnorableBackupScanError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unsupported") || strings.Contains(msg, "not configured") || strings.Contains(msg, "content type")
+}
+
+func userPoolID(username string) string {
+	return fmt.Sprintf("user_%s_pool", username)
+}

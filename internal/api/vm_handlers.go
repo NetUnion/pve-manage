@@ -1,0 +1,882 @@
+package api
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+)
+
+type createVMRequest struct {
+	ClusterKey        string   `json:"cluster_key"`
+	VMName            string   `json:"vmname"`
+	CPUKey            string   `json:"cpu_key"`
+	CPUCores          int      `json:"cpu_cores"`
+	MemoryGB          int      `json:"memory_gb"`
+	StorageKey        string   `json:"storage_key"`
+	DiskGB            int      `json:"disk_gb"`
+	BridgeKey         string   `json:"bridge_key"`
+	TemplateVMID      int      `json:"template_vmid"`
+	SSHKeys           []string `json:"sshkeys"`
+	SharedUsernames   []string `json:"shared_usernames"`
+	SecurityGroupName string   `json:"security_group_name"`
+	UESTCRestricted   *bool    `json:"uestc_restricted"`
+	Power             string   `json:"power"`
+}
+
+type patchVMRequest struct {
+	VMName            *string   `json:"vmname"`
+	CPUKey            *string   `json:"cpu_key"`
+	CPUCores          *int      `json:"cpu_cores"`
+	MemoryGB          *int      `json:"memory_gb"`
+	StorageKey        *string   `json:"storage_key"`
+	DiskGB            *int      `json:"disk_gb"`
+	BridgeKey         *string   `json:"bridge_key"`
+	TemplateVMID      *int      `json:"template_vmid"`
+	SSHKeys           *[]string `json:"sshkeys"`
+	SharedUsernames   *[]string `json:"shared_usernames"`
+	SecurityGroupName *string   `json:"security_group_name"`
+	UESTCRestricted   *bool     `json:"uestc_restricted"`
+	Power             *string   `json:"power"`
+}
+
+type createVMResponse struct {
+	VM
+	Password string `json:"password"`
+}
+
+type VM struct {
+	ID                 int64           `json:"id"`
+	OwnerUsername      string          `json:"owner_username"`
+	ClusterKey         string          `json:"cluster_key"`
+	VMID               int             `json:"vmid"`
+	VMName             string          `json:"vmname"`
+	IP                 string          `json:"ip"`
+	SSHKeys            []string        `json:"sshkeys"`
+	SharedUsernames    []string        `json:"shared_usernames"`
+	SecurityGroupName  string          `json:"security_group_name"`
+	UESTCRestricted    bool            `json:"uestc_restricted"`
+	Managed            bool            `json:"managed"`
+	Config             json.RawMessage `json:"config"`
+	PreferStatus       json.RawMessage `json:"prefer_status"`
+	RealStatus         json.RawMessage `json:"real_status"`
+	SyncState          string          `json:"sync_state"`
+	SyncError          *string         `json:"sync_error,omitempty"`
+	Version            int             `json:"version"`
+	CreatedAt          string          `json:"created_at"`
+	UpdatedAt          string          `json:"updated_at"`
+	DeletedAt          *string         `json:"deleted_at,omitempty"`
+	DeleteRequestedAt  *string         `json:"delete_requested_at,omitempty"`
+	DeleteExecuteAfter *string         `json:"delete_execute_after,omitempty"`
+}
+
+func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	items, err := s.listVMsForUser(r.Context(), current)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.vmVisibleToCurrentUser(vm, current) {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	var req createVMRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.ClusterKey == "" || req.VMName == "" || req.CPUKey == "" || req.StorageKey == "" || req.BridgeKey == "" || req.SecurityGroupName == "" {
+		s.jsonError(w, http.StatusBadRequest, "missing required fields")
+		return
+	}
+	if req.CPUCores <= 0 || req.MemoryGB <= 0 || req.DiskGB <= 0 {
+		s.jsonError(w, http.StatusBadRequest, "cpu_cores, memory_gb and disk_gb must be positive")
+		return
+	}
+	if req.DiskGB < 20 {
+		s.jsonError(w, http.StatusBadRequest, "disk_gb must be at least 20")
+		return
+	}
+	if !validSecurityGroupName(req.SecurityGroupName) {
+		s.jsonError(w, http.StatusBadRequest, "invalid security_group_name")
+		return
+	}
+	if req.Power == "" {
+		req.Power = "running"
+	}
+	if req.Power != "running" && req.Power != "stopped" {
+		s.jsonError(w, http.StatusBadRequest, "power must be running or stopped")
+		return
+	}
+	if len(req.SSHKeys) == 0 {
+		req.SSHKeys = []string{}
+	}
+	req.VMName = prefixedVMName(current.Username, req.VMName)
+	req.SharedUsernames = normalizeStringList(req.SharedUsernames)
+	for _, shared := range req.SharedUsernames {
+		if !validUsernameLike(shared) {
+			s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid shared username %q", shared))
+			return
+		}
+	}
+	if containsString(req.SharedUsernames, current.Username) {
+		s.jsonError(w, http.StatusBadRequest, "owner cannot be in shared_usernames")
+		return
+	}
+
+	cluster, err := s.getClusterConfig(req.ClusterKey)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cpuOpt, ok := cluster.CPUByKey(req.CPUKey)
+	if !ok {
+		s.jsonError(w, http.StatusBadRequest, "unknown cpu_key")
+		return
+	}
+	storageOpt, ok := cluster.StorageByKey(req.StorageKey)
+	if !ok {
+		s.jsonError(w, http.StatusBadRequest, "unknown storage_key")
+		return
+	}
+	bridgeOpt, ok := cluster.BridgeByKey(req.BridgeKey)
+	if !ok {
+		s.jsonError(w, http.StatusBadRequest, "unknown bridge_key")
+		return
+	}
+	if req.CPUCores > cpuOpt.Limit || req.MemoryGB > cpuOpt.MemoryLimit || req.DiskGB > storageOpt.Limit {
+		s.jsonError(w, http.StatusBadRequest, "requested resources exceed selected cluster option limit")
+		return
+	}
+
+	var template templateSummary
+	var realRaw string
+	if err := s.db.QueryRowContext(r.Context(), `
+		SELECT id, cluster_key, template_vmid, name, description, os_type, real_status_json, last_seen_at, created_at, updated_at
+		FROM templates
+		WHERE cluster_key = ? AND template_vmid = ?
+	`, req.ClusterKey, req.TemplateVMID).Scan(
+		&template.ID,
+		&template.ClusterKey,
+		&template.TemplateVMID,
+		&template.Name,
+		&template.Description,
+		&template.OSType,
+		&realRaw,
+		&template.LastSeenAt,
+		&template.CreatedAt,
+		&template.UpdatedAt,
+	); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "template not found")
+		return
+	}
+	template.RealStatus = rawJSONFromString(realRaw)
+
+	sg, err := s.loadSecurityGroupRow(r.Context(), current.Username, req.SecurityGroupName)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "security group not found or not owned by user")
+		return
+	}
+	_ = sg
+
+	quota := s.effectiveQuota(current)
+	if quota.Number <= 0 || quota.CPU <= 0 || quota.Memory <= 0 || quota.Storage <= 0 || quota.SecurityGroup <= 0 {
+		s.jsonError(w, http.StatusForbidden, "user quota is not configured")
+		return
+	}
+	count, usedCPU, usedMemory, usedStorage, err := s.listUserVMUsage(r.Context(), current.Username)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if count+1 > quota.Number || usedCPU+req.CPUCores > quota.CPU || usedMemory+req.MemoryGB > quota.Memory || usedStorage+req.DiskGB > quota.Storage {
+		s.jsonError(w, http.StatusBadRequest, "quota exceeded")
+		return
+	}
+
+	chooseUESTC := false
+	if req.UESTCRestricted != nil {
+		chooseUESTC = *req.UESTCRestricted
+	}
+	if quota.UESTC == "force" {
+		chooseUESTC = true
+	}
+
+	vmid, err := s.nextClusterVMID(r.Context(), req.ClusterKey, cluster.StartVMID, cluster.Limit)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ip, err := s.deriveIPv4(cluster, req.BridgeKey, vmid)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	configJSON, _ := json.Marshal(map[string]any{
+		"cluster_key":         req.ClusterKey,
+		"cpu_key":             req.CPUKey,
+		"cpu_cores":           req.CPUCores,
+		"memory_gb":           req.MemoryGB,
+		"storage_key":         req.StorageKey,
+		"disk_gb":             req.DiskGB,
+		"bridge_key":          req.BridgeKey,
+		"bridge_ipfilter":     bridgeOpt.IPFilter,
+		"template_vmid":       req.TemplateVMID,
+		"template_name":       template.Name,
+		"gateway":             bridgeOpt.IPv4.Gateway,
+		"ip":                  ip,
+		"sshkeys":             req.SSHKeys,
+		"shared_usernames":    req.SharedUsernames,
+		"security_group_name": req.SecurityGroupName,
+		"uestc_restricted":    chooseUESTC,
+		"power":               req.Power,
+		"root_user":           "root",
+		"full_clone_storage":  req.StorageKey,
+	})
+	preferJSON, _ := json.Marshal(map[string]any{
+		"intent":              "present",
+		"power":               req.Power,
+		"generation":          1,
+		"vmname":              req.VMName,
+		"template_vmid":       req.TemplateVMID,
+		"cpu_key":             req.CPUKey,
+		"cpu_cores":           req.CPUCores,
+		"memory_gb":           req.MemoryGB,
+		"storage_key":         req.StorageKey,
+		"disk_gb":             req.DiskGB,
+		"bridge_key":          req.BridgeKey,
+		"ip":                  ip,
+		"gateway":             bridgeOpt.IPv4.Gateway,
+		"sshkeys":             req.SSHKeys,
+		"shared_usernames":    req.SharedUsernames,
+		"security_group_name": req.SecurityGroupName,
+		"uestc_restricted":    chooseUESTC,
+	})
+	realJSON, _ := json.Marshal(map[string]any{
+		"intent":         "present",
+		"power":          "unknown",
+		"vmid":           vmid,
+		"ip":             ip,
+		"last_synced_at": nil,
+	})
+	password := randomPassword(20)
+	now := timestamp()
+	sshkeysJSON := mustJSON(req.SSHKeys)
+	sharedJSON := mustJSON(req.SharedUsernames)
+	var uestcRestricted int
+	if chooseUESTC {
+		uestcRestricted = 1
+	}
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(r.Context(), `
+		INSERT INTO vms(
+			owner_username, cluster_key, vmid, vmname, ip, password,
+			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
+			config_json, prefer_status_json, real_status_json, sync_state, version,
+			created_at, updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',1,?,?)
+	`, current.Username, req.ClusterKey, vmid, req.VMName, ip, password, sshkeysJSON, sharedJSON, req.SecurityGroupName, uestcRestricted, string(configJSON), string(preferJSON), string(realJSON), now, now)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, createVMResponse{
+		VM: VM{
+			ID:                 vm.ID,
+			OwnerUsername:      vm.OwnerUsername,
+			ClusterKey:         vm.ClusterKey,
+			VMID:               vm.VMID,
+			VMName:             vm.VMName,
+			IP:                 vm.IP,
+			SSHKeys:            vm.SSHKeys,
+			SharedUsernames:    vm.SharedUsernames,
+			SecurityGroupName:  vm.SecurityGroupName,
+			UESTCRestricted:    vm.UESTCRestricted,
+			Managed:            vm.Managed,
+			Config:             vm.Config,
+			PreferStatus:       vm.PreferStatus,
+			RealStatus:         vm.RealStatus,
+			SyncState:          vm.SyncState,
+			SyncError:          vm.SyncError,
+			Version:            vm.Version,
+			CreatedAt:          vm.CreatedAt,
+			UpdatedAt:          vm.UpdatedAt,
+			DeletedAt:          vm.DeletedAt,
+			DeleteRequestedAt:  vm.DeleteRequestedAt,
+			DeleteExecuteAfter: vm.DeleteExecuteAfter,
+		},
+		Password: password,
+	})
+}
+
+func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.vmVisibleToCurrentUser(vm, current) {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot be modified")
+		return
+	}
+	if vm.SyncState == "deleting" || vm.DeleteRequestedAt != nil {
+		s.jsonError(w, http.StatusBadRequest, "vm is pending deletion")
+		return
+	}
+
+	var req patchVMRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	sharedOnly := current.Username != vm.OwnerUsername && !current.IsAdmin
+	if sharedOnly {
+		if req.VMName != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
+			s.jsonError(w, http.StatusForbidden, "shared users can only change power")
+			return
+		}
+	}
+
+	cfg := map[string]any{}
+	_ = json.Unmarshal(vm.Config, &cfg)
+	oldCfg := map[string]any{}
+	_ = json.Unmarshal(vm.Config, &oldCfg)
+	prefer := map[string]any{}
+	_ = json.Unmarshal(vm.PreferStatus, &prefer)
+	changed := false
+
+	if req.VMName != nil {
+		name := strings.TrimSpace(*req.VMName)
+		if name == "" {
+			s.jsonError(w, http.StatusBadRequest, "vmname is required")
+			return
+		}
+		vm.VMName = prefixedVMName(vm.OwnerUsername, name)
+		prefer["vmname"] = vm.VMName
+		changed = true
+	}
+	if req.SSHKeys != nil && !sharedOnly {
+		vm.SSHKeys = normalizeStringList(*req.SSHKeys)
+		cfg["sshkeys"] = vm.SSHKeys
+		prefer["sshkeys"] = vm.SSHKeys
+		changed = true
+	}
+	if req.SharedUsernames != nil && !sharedOnly {
+		vm.SharedUsernames = normalizeStringList(*req.SharedUsernames)
+		for _, shared := range vm.SharedUsernames {
+			if !validUsernameLike(shared) {
+				s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid shared username %q", shared))
+				return
+			}
+		}
+		if containsString(vm.SharedUsernames, vm.OwnerUsername) {
+			s.jsonError(w, http.StatusBadRequest, "owner cannot be in shared_usernames")
+			return
+		}
+		cfg["shared_usernames"] = vm.SharedUsernames
+		prefer["shared_usernames"] = vm.SharedUsernames
+		changed = true
+	}
+	if req.SecurityGroupName != nil && !sharedOnly {
+		if !validSecurityGroupName(*req.SecurityGroupName) {
+			s.jsonError(w, http.StatusBadRequest, "invalid security_group_name")
+			return
+		}
+		if _, err := s.loadSecurityGroupRow(r.Context(), vm.OwnerUsername, *req.SecurityGroupName); err != nil {
+			s.jsonError(w, http.StatusBadRequest, "security group not found or not owned by owner")
+			return
+		}
+		vm.SecurityGroupName = *req.SecurityGroupName
+		cfg["security_group_name"] = vm.SecurityGroupName
+		prefer["security_group_name"] = vm.SecurityGroupName
+		changed = true
+	}
+	if req.UESTCRestricted != nil && !sharedOnly {
+		vm.UESTCRestricted = *req.UESTCRestricted
+		cfg["uestc_restricted"] = vm.UESTCRestricted
+		prefer["uestc_restricted"] = vm.UESTCRestricted
+		changed = true
+	}
+	if req.Power != nil {
+		if *req.Power != "running" && *req.Power != "stopped" && *req.Power != "reboot" {
+			s.jsonError(w, http.StatusBadRequest, "invalid power")
+			return
+		}
+		prefer["power"] = *req.Power
+		changed = true
+	}
+	if req.CPUKey != nil || req.StorageKey != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil {
+		if sharedOnly {
+			s.jsonError(w, http.StatusForbidden, "shared users can only change power")
+			return
+		}
+		cluster, err := s.getClusterConfig(vm.ClusterKey)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if req.CPUKey != nil {
+			if _, ok := cluster.CPUByKey(*req.CPUKey); !ok {
+				s.jsonError(w, http.StatusBadRequest, "unknown cpu_key")
+				return
+			}
+			cfg["cpu_key"] = *req.CPUKey
+			prefer["cpu_key"] = *req.CPUKey
+		}
+		if req.StorageKey != nil {
+			if _, ok := cluster.StorageByKey(*req.StorageKey); !ok {
+				s.jsonError(w, http.StatusBadRequest, "unknown storage_key")
+				return
+			}
+			cfg["storage_key"] = *req.StorageKey
+			prefer["storage_key"] = *req.StorageKey
+		}
+		if req.BridgeKey != nil {
+			bridge, ok := cluster.BridgeByKey(*req.BridgeKey)
+			if !ok {
+				s.jsonError(w, http.StatusBadRequest, "unknown bridge_key")
+				return
+			}
+			cfg["bridge_key"] = *req.BridgeKey
+			cfg["gateway"] = bridge.IPv4.Gateway
+			prefer["bridge_key"] = *req.BridgeKey
+			prefer["gateway"] = bridge.IPv4.Gateway
+		}
+		if req.TemplateVMID != nil {
+			if _, err := s.loadTemplateRow(r.Context(), vm.ClusterKey, *req.TemplateVMID); err != nil {
+				s.jsonError(w, http.StatusBadRequest, "template not found")
+				return
+			}
+			cfg["template_vmid"] = *req.TemplateVMID
+			prefer["template_vmid"] = *req.TemplateVMID
+		}
+		if req.CPUCores != nil {
+			cfg["cpu_cores"] = *req.CPUCores
+			prefer["cpu_cores"] = *req.CPUCores
+		}
+		if req.MemoryGB != nil {
+			cfg["memory_gb"] = *req.MemoryGB
+			prefer["memory_gb"] = *req.MemoryGB
+		}
+		if req.DiskGB != nil {
+			cfg["disk_gb"] = *req.DiskGB
+			prefer["disk_gb"] = *req.DiskGB
+		}
+		changed = true
+	}
+
+	if !changed {
+		s.jsonError(w, http.StatusBadRequest, "no changes requested")
+		return
+	}
+
+	if req.UESTCRestricted != nil && !current.IsAdmin && current.Username == vm.OwnerUsername {
+		quota := s.effectiveQuota(current)
+		if quota.UESTC == "force" && !vm.UESTCRestricted {
+			s.jsonError(w, http.StatusBadRequest, "uestc is forced for this user")
+			return
+		}
+	}
+
+	if req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil {
+		finalCPUKey, _ := cfg["cpu_key"].(string)
+		finalStorageKey, _ := cfg["storage_key"].(string)
+		finalCPUCores := intFromOrZero(cfg, "cpu_cores")
+		finalMemoryGB := intFromOrZero(cfg, "memory_gb")
+		finalDiskGB := intFromOrZero(cfg, "disk_gb")
+		clusterCfg, err := s.getClusterConfig(vm.ClusterKey)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if cpuOpt, ok := clusterCfg.CPUByKey(finalCPUKey); ok && finalCPUCores > cpuOpt.Limit {
+			s.jsonError(w, http.StatusBadRequest, "cpu_cores exceed cluster option limit")
+			return
+		}
+		if cpuOpt, ok := clusterCfg.CPUByKey(finalCPUKey); ok && finalMemoryGB > cpuOpt.MemoryLimit {
+			s.jsonError(w, http.StatusBadRequest, "memory_gb exceed cluster option limit")
+			return
+		}
+		if storageOpt, ok := clusterCfg.StorageByKey(finalStorageKey); ok && finalDiskGB > storageOpt.Limit {
+			s.jsonError(w, http.StatusBadRequest, "disk_gb exceed cluster option limit")
+			return
+		}
+		if req.DiskGB != nil && *req.DiskGB < intFromOrZero(oldCfg, "disk_gb") {
+			s.jsonError(w, http.StatusBadRequest, "disk resize cannot shrink")
+			return
+		}
+		quota := s.effectiveQuota(current)
+		count, usedCPU, usedMemory, usedStorage, err := s.listUserVMUsage(r.Context(), current.Username)
+		if err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		_ = count
+		usedCPU -= intFromOrZero(oldCfg, "cpu_cores")
+		usedCPU += finalCPUCores
+		usedMemory -= intFromOrZero(oldCfg, "memory_gb")
+		usedMemory += finalMemoryGB
+		usedStorage -= intFromOrZero(oldCfg, "disk_gb")
+		usedStorage += finalDiskGB
+		if usedCPU > quota.CPU || usedMemory > quota.Memory || usedStorage > quota.Storage {
+			s.jsonError(w, http.StatusBadRequest, "quota exceeded")
+			return
+		}
+		if finalDiskGB < 20 {
+			s.jsonError(w, http.StatusBadRequest, "disk_gb must be at least 20")
+			return
+		}
+	}
+
+	now := timestamp()
+	prefer["generation"] = intFromOrZero(prefer, "generation") + 1
+	cfgBytes, _ := json.Marshal(cfg)
+	preferBytes, _ := json.Marshal(prefer)
+	sharedJSON := mustJSON(vm.SharedUsernames)
+	sshKeysJSON := mustJSON(vm.SSHKeys)
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET vmname = ?, ip = ?, sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
+		    uestc_restricted = ?, config_json = ?, prefer_status_json = ?, sync_state = 'pending',
+		    sync_error = NULL, version = version + 1, updated_at = ?
+		WHERE id = ?
+	`, vm.VMName, vm.IP, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), string(cfgBytes), string(preferBytes), now, vm.ID)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		s.jsonError(w, http.StatusNotFound, "vm not found")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	vm, err = s.loadVMRow(r.Context(), vm.ID)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !current.IsAdmin && current.Username != vm.OwnerUsername {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot be deleted")
+		return
+	}
+	if vm.SyncState == "deleting" || vm.DeleteRequestedAt != nil {
+		s.jsonError(w, http.StatusBadRequest, "vm is already pending deletion")
+		return
+	}
+	now := time.Now().UTC()
+	execAt := now.Add(24 * time.Hour)
+	prefer := map[string]any{}
+	_ = json.Unmarshal(vm.PreferStatus, &prefer)
+	prevPower, _ := prefer["power"].(string)
+	if prevPower == "" {
+		prevPower = "running"
+	}
+	prefer["intent"] = "delete_pending"
+	prefer["power"] = "stopped"
+	prefer["power_before_delete"] = prevPower
+	prefer["delete_execute_after"] = execAt.Format(time.RFC3339Nano)
+	prefer["generation"] = intFromOrZero(prefer, "generation") + 1
+	preferBytes, _ := json.Marshal(prefer)
+	nowStr := now.Format(time.RFC3339Nano)
+	execStr := execAt.Format(time.RFC3339Nano)
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET prefer_status_json = ?, sync_state = 'deleting', sync_error = NULL,
+		    delete_requested_at = ?, delete_execute_after = ?, updated_at = ?, version = version + 1
+		WHERE id = ?
+	`, string(preferBytes), nowStr, execStr, nowStr, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "delete_execute_after": execStr})
+}
+
+func (s *Server) handleRestoreVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !current.IsAdmin && current.Username != vm.OwnerUsername {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot be restored")
+		return
+	}
+	if vm.SyncState != "deleting" && vm.DeleteRequestedAt == nil {
+		s.jsonError(w, http.StatusBadRequest, "vm is not pending deletion")
+		return
+	}
+
+	prefer := map[string]any{}
+	_ = json.Unmarshal(vm.PreferStatus, &prefer)
+	restorePower, _ := prefer["power_before_delete"].(string)
+	if restorePower == "" {
+		restorePower = "running"
+	}
+	prefer["intent"] = "present"
+	prefer["power"] = restorePower
+	delete(prefer, "delete_execute_after")
+	delete(prefer, "power_before_delete")
+	prefer["generation"] = intFromOrZero(prefer, "generation") + 1
+	preferBytes, _ := json.Marshal(prefer)
+	nowStr := timestamp()
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET prefer_status_json = ?, sync_state = 'pending', sync_error = NULL,
+		    delete_requested_at = NULL, delete_execute_after = NULL, updated_at = ?, version = version + 1
+		WHERE id = ?
+	`, string(preferBytes), nowStr, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleDeleteNowVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !current.IsAdmin && current.Username != vm.OwnerUsername {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot be deleted")
+		return
+	}
+	if vm.SyncState != "deleting" && vm.DeleteRequestedAt == nil {
+		s.jsonError(w, http.StatusBadRequest, "vm is not pending deletion")
+		return
+	}
+
+	prefer := map[string]any{}
+	_ = json.Unmarshal(vm.PreferStatus, &prefer)
+	prevPower, _ := prefer["power_before_delete"].(string)
+	if prevPower == "" {
+		prevPower = "running"
+	}
+	now := time.Now().UTC()
+	prefer["intent"] = "delete_pending"
+	prefer["power"] = "stopped"
+	prefer["power_before_delete"] = prevPower
+	prefer["delete_execute_after"] = now.Format(time.RFC3339Nano)
+	prefer["generation"] = intFromOrZero(prefer, "generation") + 1
+	preferBytes, _ := json.Marshal(prefer)
+	nowStr := now.Format(time.RFC3339Nano)
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET prefer_status_json = ?, sync_state = 'deleting', sync_error = NULL,
+		    delete_requested_at = COALESCE(delete_requested_at, ?),
+		    delete_execute_after = ?, updated_at = ?, version = version + 1
+		WHERE id = ?
+	`, string(preferBytes), nowStr, nowStr, nowStr, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "delete_execute_after": nowStr})
+}
+
+func intFromOrZero(obj map[string]any, key string) int {
+	if obj == nil {
+		return 0
+	}
+	v, ok := obj[key]
+	if !ok {
+		return 0
+	}
+	n, ok := intFromAny(v)
+	if !ok {
+		return 0
+	}
+	return n
+}

@@ -1,0 +1,655 @@
+package api
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"net"
+	"net/http"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"cloud-manage/internal/config"
+	"cloud-manage/internal/model"
+)
+
+var (
+	sgNamePattern      = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}[a-z0-9]$|^[a-z0-9]$`)
+	usernameTokenRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`)
+)
+
+type apiError struct {
+	Error string `json:"error"`
+}
+
+type userEnvelope struct {
+	Username string   `json:"username"`
+	Email    string   `json:"email"`
+	Name     string   `json:"name"`
+	Groups   []string `json:"groups"`
+	IsAdmin  bool     `json:"is_admin"`
+}
+
+type vmSummary struct {
+	ID                 int64           `json:"id"`
+	OwnerUsername      string          `json:"owner_username"`
+	ClusterKey         string          `json:"cluster_key"`
+	VMID               int             `json:"vmid"`
+	VMName             string          `json:"vmname"`
+	IP                 string          `json:"ip"`
+	Password           string          `json:"-"`
+	SSHKeys            []string        `json:"sshkeys"`
+	SharedUsernames    []string        `json:"shared_usernames"`
+	SecurityGroupName  string          `json:"security_group_name"`
+	UESTCRestricted    bool            `json:"uestc_restricted"`
+	Managed            bool            `json:"managed"`
+	Config             json.RawMessage `json:"config"`
+	PreferStatus       json.RawMessage `json:"prefer_status"`
+	RealStatus         json.RawMessage `json:"real_status"`
+	SyncState          string          `json:"sync_state"`
+	SyncError          *string         `json:"sync_error,omitempty"`
+	Version            int             `json:"version"`
+	CreatedAt          string          `json:"created_at"`
+	UpdatedAt          string          `json:"updated_at"`
+	DeletedAt          *string         `json:"deleted_at,omitempty"`
+	DeleteRequestedAt  *string         `json:"delete_requested_at,omitempty"`
+	DeleteExecuteAfter *string         `json:"delete_execute_after,omitempty"`
+}
+
+type securityGroupSummary struct {
+	ID            int64           `json:"id"`
+	OwnerUsername string          `json:"owner_username"`
+	Name          string          `json:"name"`
+	Rules         json.RawMessage `json:"rules"`
+	CreatedAt     string          `json:"created_at"`
+	UpdatedAt     string          `json:"updated_at"`
+}
+
+type templateSummary struct {
+	ID           int64           `json:"id"`
+	ClusterKey   string          `json:"cluster_key"`
+	TemplateVMID int             `json:"template_vmid"`
+	Name         string          `json:"name"`
+	Description  *string         `json:"description,omitempty"`
+	OSType       *string         `json:"os_type,omitempty"`
+	RealStatus   json.RawMessage `json:"real_status"`
+	LastSeenAt   string          `json:"last_seen_at"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
+}
+
+type quota struct {
+	Number        int
+	CPU           int
+	Memory        int
+	Storage       int
+	SecurityGroup int
+	UESTC         string
+}
+
+func (s *Server) jsonError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, apiError{Error: msg})
+}
+
+func decodeJSONBody(r *http.Request, dst any) error {
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseJSONStrings(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func mustJSON(v any) string {
+	data, _ := json.Marshal(v)
+	return string(data)
+}
+
+func rawJSONFromString(raw string) json.RawMessage {
+	if raw == "" {
+		return json.RawMessage("null")
+	}
+	return json.RawMessage(raw)
+}
+
+func normalizeStringList(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func validSecurityGroupName(name string) bool {
+	return sgNamePattern.MatchString(name)
+}
+
+func validUsernameLike(name string) bool {
+	return usernameTokenRegex.MatchString(name)
+}
+
+func prefixedVMName(owner, name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || owner == "" {
+		return name
+	}
+	prefix := owner + "-"
+	if strings.HasPrefix(name, prefix) {
+		return name
+	}
+	return prefix + name
+}
+
+func normalizeCIDR(input string, ethertype string) (string, error) {
+	ip := net.ParseIP(input)
+	if ip == nil {
+		_, n, err := net.ParseCIDR(input)
+		if err != nil {
+			return "", err
+		}
+		if ethertype == "ipv4" && n.IP.To4() == nil {
+			return "", fmt.Errorf("cidr must be ipv4")
+		}
+		if ethertype == "ipv6" && n.IP.To4() != nil {
+			return "", fmt.Errorf("cidr must be ipv6")
+		}
+		return n.String(), nil
+	}
+
+	if ethertype == "ipv4" {
+		return ip.To4().String() + "/32", nil
+	}
+	if ethertype == "ipv6" {
+		return ip.String() + "/128", nil
+	}
+	return "", fmt.Errorf("unsupported ethertype %q", ethertype)
+}
+
+func parsePort(v *int, raw any) error {
+	if raw == nil {
+		*v = 0
+		return nil
+	}
+	switch n := raw.(type) {
+	case float64:
+		*v = int(n)
+	case int:
+		*v = n
+	case int64:
+		*v = int(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return err
+		}
+		*v = int(i)
+	case string:
+		i, err := strconv.Atoi(n)
+		if err != nil {
+			return err
+		}
+		*v = i
+	default:
+		return fmt.Errorf("invalid port type %T", raw)
+	}
+	return nil
+}
+
+func randomPassword(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	if n <= 0 {
+		n = 16
+	}
+	out := make([]byte, n)
+	for i := range out {
+		v, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
+		if err != nil {
+			out[i] = alphabet[i%len(alphabet)]
+			continue
+		}
+		out[i] = alphabet[v.Int64()]
+	}
+	return string(out)
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func (s *Server) currentUser(r *http.Request) (*model.User, error) {
+	return s.auth.CurrentUser(r)
+}
+
+func (s *Server) currentGroups(r *http.Request) ([]string, *model.User, error) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	return parseJSONStrings(user.GroupsJSON), user, nil
+}
+
+func (s *Server) adminAndUser(r *http.Request) (*model.User, bool, error) {
+	user, err := s.currentUser(r)
+	if err != nil {
+		return nil, false, err
+	}
+	return user, user.IsAdmin, nil
+}
+
+func parseNullableTime(raw sql.NullString) *string {
+	if !raw.Valid || raw.String == "" {
+		return nil
+	}
+	value := raw.String
+	return &value
+}
+
+func parseTimeString(raw string) string {
+	return raw
+}
+
+func (s *Server) loadUserRow(ctx context.Context, username string) (*model.User, error) {
+	var user model.User
+	var createdAt, updatedAt string
+	var lastLogin sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, username, email, name, groups_json, is_active, is_admin, created_at, updated_at, last_login_at
+		FROM users
+		WHERE username = ?
+	`, username).Scan(
+		&user.ID,
+		&user.Username,
+		&user.Email,
+		&user.Name,
+		&user.GroupsJSON,
+		&user.IsActive,
+		&user.IsAdmin,
+		&createdAt,
+		&updatedAt,
+		&lastLogin,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if t, err := time.Parse(time.RFC3339Nano, createdAt); err == nil {
+		user.CreatedAt = t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, updatedAt); err == nil {
+		user.UpdatedAt = t
+	}
+	if lastLogin.Valid {
+		if t, err := time.Parse(time.RFC3339Nano, lastLogin.String); err == nil {
+			user.LastLoginAt = &t
+		}
+	}
+	return &user, nil
+}
+
+func (s *Server) getClusterConfig(clusterKey string) (config.Cluster, error) {
+	cluster, ok := s.config.ClusterByKey(clusterKey)
+	if !ok {
+		return config.Cluster{}, fmt.Errorf("unknown cluster %q", clusterKey)
+	}
+	return cluster, nil
+}
+
+func (s *Server) effectiveQuota(user *model.User) quota {
+	limits := s.config.EffectiveUserLimit(parseJSONStrings(user.GroupsJSON))
+	return quota{
+		Number:        limits.Number,
+		CPU:           limits.CPU,
+		Memory:        limits.Memory,
+		Storage:       limits.Storage,
+		SecurityGroup: limits.SecurityGroup,
+		UESTC:         limits.UESTC,
+	}
+}
+
+func (s *Server) listUserVMUsage(ctx context.Context, username string) (count, cpu, memory, storage int, err error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT config_json
+		FROM vms
+		WHERE owner_username = ? AND deleted_at IS NULL AND managed = 1
+	`, username)
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return 0, 0, 0, 0, err
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+			continue
+		}
+		count++
+		if v, ok := cfg["cpu_cores"]; ok {
+			if n, ok := intFromAny(v); ok {
+				cpu += n
+			}
+		}
+		if v, ok := cfg["memory_gb"]; ok {
+			if n, ok := intFromAny(v); ok {
+				memory += n
+			}
+		}
+		if v, ok := cfg["disk_gb"]; ok {
+			if n, ok := intFromAny(v); ok {
+				storage += n
+			}
+		}
+	}
+	return count, cpu, memory, storage, rows.Err()
+}
+
+func (s *Server) countUserSecurityGroups(ctx context.Context, username string) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM security_groups
+		WHERE owner_username = ?
+	`, username).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *Server) clusterVMCounts(ctx context.Context, clusterKey string) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM vms
+		WHERE cluster_key = ? AND deleted_at IS NULL
+	`, clusterKey).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func (s *Server) nextClusterVMID(ctx context.Context, clusterKey string, startVMID, limit int) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT vmid
+		FROM vms
+		WHERE cluster_key = ? AND deleted_at IS NULL
+		ORDER BY vmid
+	`, clusterKey)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	used := make(map[int]struct{}, limit)
+	for rows.Next() {
+		var vmid int
+		if err := rows.Scan(&vmid); err != nil {
+			return 0, err
+		}
+		used[vmid] = struct{}{}
+	}
+
+	for vmid := startVMID; vmid < startVMID+limit; vmid++ {
+		if _, ok := used[vmid]; !ok {
+			return vmid, nil
+		}
+	}
+	return 0, fmt.Errorf("no vmid available in cluster %s", clusterKey)
+}
+
+func (s *Server) deriveIPv4(cluster config.Cluster, bridgeKey string, vmid int) (string, error) {
+	bridge, ok := cluster.BridgeByKey(bridgeKey)
+	if !ok {
+		return "", fmt.Errorf("unknown bridge %q", bridgeKey)
+	}
+	base, ok := netParseIPv4(bridge.IPv4.StartIP)
+	if !ok {
+		return "", fmt.Errorf("bridge %s has invalid ipv4 start_ip", bridgeKey)
+	}
+	offset := vmid - cluster.StartVMID
+	ip, err := addIPv4(base, offset)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/%d", ip.String(), bridge.IPv4.CIDR), nil
+}
+
+func (s *Server) loadVMRow(ctx context.Context, id int64) (*vmSummary, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, password, sshkeys_json, shared_usernames_json,
+		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
+		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
+		FROM vms
+		WHERE id = ?
+	`, id)
+
+	var item vmSummary
+	var sshkeys, shared string
+	var configRaw, preferRaw, realRaw string
+	var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
+	if err := row.Scan(
+		&item.ID,
+		&item.OwnerUsername,
+		&item.ClusterKey,
+		&item.VMID,
+		&item.VMName,
+		&item.IP,
+		&item.Password,
+		&sshkeys,
+		&shared,
+		&item.SecurityGroupName,
+		&item.UESTCRestricted,
+		&item.Managed,
+		&configRaw,
+		&preferRaw,
+		&realRaw,
+		&item.SyncState,
+		&item.SyncError,
+		&item.Version,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+		&deletedAt,
+		&deleteRequestedAt,
+		&deleteExecuteAfter,
+	); err != nil {
+		return nil, err
+	}
+	item.Config = rawJSONFromString(configRaw)
+	item.PreferStatus = rawJSONFromString(preferRaw)
+	item.RealStatus = rawJSONFromString(realRaw)
+	item.SSHKeys = parseJSONStrings(sshkeys)
+	item.SharedUsernames = parseJSONStrings(shared)
+	item.DeletedAt = parseNullableTime(deletedAt)
+	item.DeleteRequestedAt = parseNullableTime(deleteRequestedAt)
+	item.DeleteExecuteAfter = parseNullableTime(deleteExecuteAfter)
+	return &item, nil
+}
+
+func (s *Server) visibleVM(ctx context.Context, id int64, user *model.User) (*vmSummary, error) {
+	item, err := s.loadVMRow(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if user.IsAdmin || user.Username == item.OwnerUsername {
+		return item, nil
+	}
+	if containsString(item.SharedUsernames, user.Username) {
+		return item, nil
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (s *Server) loadSecurityGroupRow(ctx context.Context, owner, name string) (*securityGroupSummary, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, owner_username, name, rules_json, created_at, updated_at
+		FROM security_groups
+		WHERE owner_username = ? AND name = ?
+	`, owner, name)
+
+	var item securityGroupSummary
+	var rulesRaw string
+	if err := row.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return nil, err
+	}
+	item.Rules = rawJSONFromString(rulesRaw)
+	return &item, nil
+}
+
+func (s *Server) loadTemplateRow(ctx context.Context, clusterKey string, templateVMID int) (*templateSummary, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, cluster_key, template_vmid, name, description, os_type, real_status_json, last_seen_at, created_at, updated_at
+		FROM templates
+		WHERE cluster_key = ? AND template_vmid = ?
+	`, clusterKey, templateVMID)
+
+	var item templateSummary
+	var realRaw string
+	if err := row.Scan(
+		&item.ID,
+		&item.ClusterKey,
+		&item.TemplateVMID,
+		&item.Name,
+		&item.Description,
+		&item.OSType,
+		&realRaw,
+		&item.LastSeenAt,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	item.RealStatus = rawJSONFromString(realRaw)
+	return &item, nil
+}
+
+func (s *Server) visibleSecurityGroup(ctx context.Context, ownerUsername, name string, current *model.User) (*securityGroupSummary, error) {
+	item, err := s.loadSecurityGroupRow(ctx, ownerUsername, name)
+	if err != nil {
+		return nil, err
+	}
+	if current.IsAdmin || current.Username == ownerUsername {
+		return item, nil
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (s *Server) listVMsForUser(ctx context.Context, current *model.User) ([]vmSummary, error) {
+	return s.listVMs(ctx, current, false)
+}
+
+func (s *Server) listAllVMs(ctx context.Context) ([]vmSummary, error) {
+	return s.listVMs(ctx, nil, true)
+}
+
+func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bool) ([]vmSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, password, sshkeys_json, shared_usernames_json,
+		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
+		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
+		FROM vms
+		WHERE deleted_at IS NULL
+		ORDER BY cluster_key, vmid
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]vmSummary, 0)
+	for rows.Next() {
+		var item vmSummary
+		var sshkeys, shared string
+		var configRaw, preferRaw, realRaw string
+		var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
+		if err := rows.Scan(
+			&item.ID,
+			&item.OwnerUsername,
+			&item.ClusterKey,
+			&item.VMID,
+			&item.VMName,
+			&item.IP,
+			&item.Password,
+			&sshkeys,
+			&shared,
+			&item.SecurityGroupName,
+			&item.UESTCRestricted,
+			&item.Managed,
+			&configRaw,
+			&preferRaw,
+			&realRaw,
+			&item.SyncState,
+			&item.SyncError,
+			&item.Version,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+			&deletedAt,
+			&deleteRequestedAt,
+			&deleteExecuteAfter,
+		); err != nil {
+			return nil, err
+		}
+		item.Config = rawJSONFromString(configRaw)
+		item.PreferStatus = rawJSONFromString(preferRaw)
+		item.RealStatus = rawJSONFromString(realRaw)
+		item.SSHKeys = parseJSONStrings(sshkeys)
+		item.SharedUsernames = parseJSONStrings(shared)
+		item.DeletedAt = parseNullableTime(deletedAt)
+		item.DeleteRequestedAt = parseNullableTime(deleteRequestedAt)
+		item.DeleteExecuteAfter = parseNullableTime(deleteExecuteAfter)
+		if includeAll || (item.Managed && current != nil && (current.Username == item.OwnerUsername || containsString(item.SharedUsernames, current.Username))) {
+			items = append(items, item)
+		}
+	}
+	return items, rows.Err()
+}
+
+func (vm *vmSummary) SharedUsernamesToJSON() string {
+	if len(vm.SharedUsernames) == 0 {
+		return "[]"
+	}
+	return mustJSON(vm.SharedUsernames)
+}
+
+func (s *Server) vmVisibleToCurrentUser(vm *vmSummary, current *model.User) bool {
+	return current.IsAdmin || current.Username == vm.OwnerUsername || containsString(vm.SharedUsernames, current.Username)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}

@@ -1,0 +1,150 @@
+package db
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+)
+
+type Migration struct {
+	Version int
+	Name    string
+	SQL     string
+}
+
+var migrations = []Migration{
+	{
+		Version: 1,
+		Name:    "initial_schema",
+		SQL: `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT,
+    name TEXT,
+    groups_json TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS security_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_username TEXT NOT NULL,
+    name TEXT NOT NULL,
+    rules_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner_username, name)
+);
+
+CREATE TABLE IF NOT EXISTS templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cluster_key TEXT NOT NULL,
+    template_vmid INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    os_type TEXT,
+    real_status_json TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(cluster_key, template_vmid)
+);
+
+CREATE TABLE IF NOT EXISTS vms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_username TEXT NOT NULL,
+    cluster_key TEXT NOT NULL,
+    vmid INTEGER NOT NULL,
+    vmname TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    password TEXT NOT NULL,
+    sshkeys_json TEXT NOT NULL,
+    shared_usernames_json TEXT NOT NULL,
+    security_group_name TEXT NOT NULL,
+    uestc_restricted INTEGER NOT NULL DEFAULT 0,
+    config_json TEXT NOT NULL,
+    prefer_status_json TEXT NOT NULL,
+    real_status_json TEXT NOT NULL,
+    sync_state TEXT NOT NULL,
+    sync_error TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    delete_requested_at TEXT,
+    delete_execute_after TEXT,
+    UNIQUE(cluster_key, vmid)
+);
+`,
+	},
+	{
+		Version: 2,
+		Name:    "managed_vm_flag",
+		SQL: `
+ALTER TABLE vms ADD COLUMN managed INTEGER NOT NULL DEFAULT 1;
+`,
+	},
+}
+
+func Migrate(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);`); err != nil {
+		return err
+	}
+
+	for _, migration := range migrations {
+		applied, err := migrationApplied(ctx, db, migration.Version)
+		if err != nil {
+			return err
+		}
+		if applied {
+			continue
+		}
+
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("apply migration %d (%s): %w", migration.Version, migration.Name, err)
+		}
+
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO schema_migrations(version, name) VALUES(?, ?)`,
+			migration.Version,
+			migration.Name,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("record migration %d (%s): %w", migration.Version, migration.Name, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func migrationApplied(ctx context.Context, db *sql.DB, version int) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations WHERE version = ?`, version).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
