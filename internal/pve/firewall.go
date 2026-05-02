@@ -145,9 +145,6 @@ func (c *Client) ensureVMIPSet(ctx context.Context, clusterKey, node string, vmi
 
 func (c *Client) ensureVMGroupRules(ctx context.Context, clusterKey, node string, vmid int, groups []string) error {
 	base := fmt.Sprintf("/nodes/%s/qemu/%d/firewall/rules", url.PathEscape(node), vmid)
-	if err := c.clearFirewallRules(ctx, clusterKey, base); err != nil {
-		return err
-	}
 	for _, group := range groups {
 		if group == "" {
 			continue
@@ -160,6 +157,45 @@ func (c *Client) ensureVMGroupRules(ctx context.Context, clusterKey, node string
 			if isAlreadyExistsErr(err) {
 				continue
 			}
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) applyVMFirewallRules(ctx context.Context, clusterKey, node string, vmid int, rules []SecurityRule) error {
+	base := fmt.Sprintf("/nodes/%s/qemu/%d/firewall/rules", url.PathEscape(node), vmid)
+	if err := c.clearFirewallRules(ctx, clusterKey, base); err != nil {
+		return err
+	}
+	for _, rule := range rules {
+		params := url.Values{
+			"type":   {rule.Direction},
+			"action": {pveAction(rule.Action)},
+			"enable": {"1"},
+		}
+		if rule.Protocol != "" {
+			params.Set("proto", rule.Protocol)
+		}
+		if rule.CIDR != "" {
+			if rule.Direction == "out" {
+				params.Set("dest", rule.CIDR)
+			} else {
+				params.Set("source", rule.CIDR)
+			}
+		}
+		if rule.Protocol == "tcp" || rule.Protocol == "udp" {
+			if rule.PortStart != nil && rule.PortEnd != nil {
+				if *rule.PortStart == *rule.PortEnd {
+					params.Set("dport", strconv.Itoa(*rule.PortStart))
+				} else {
+					params.Set("dport", fmt.Sprintf("%d:%d", *rule.PortStart, *rule.PortEnd))
+				}
+			} else if rule.PortStart != nil {
+				params.Set("dport", strconv.Itoa(*rule.PortStart))
+			}
+		}
+		if err := c.request(ctx, clusterKey, http.MethodPost, base, params, nil); err != nil {
 			return err
 		}
 	}

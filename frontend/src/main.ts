@@ -69,6 +69,7 @@ type VM = {
   deleted_at?: string | null
   delete_requested_at?: string | null
   delete_execute_after?: string | null
+  password?: string
 }
 
 type SecurityGroup = {
@@ -76,6 +77,15 @@ type SecurityGroup = {
   owner_username: string
   name: string
   rules: Rule[]
+  created_at: string
+  updated_at: string
+}
+
+type SSHKey = {
+  id: number
+  owner_username: string
+  name: string
+  public_key: string
   created_at: string
   updated_at: string
 }
@@ -117,6 +127,7 @@ const state = {
   vms: [] as VM[],
   allVMs: [] as VM[],
   securityGroups: [] as SecurityGroup[],
+  sshKeys: [] as SSHKey[],
   templates: [] as Template[],
   users: [] as UserRow[],
   activeTab: 'vms',
@@ -127,6 +138,8 @@ const state = {
   sgDialogMode: 'create' as 'create' | 'edit',
   sgDialogGroup: null as SecurityGroup | null,
   sgRules: [] as Rule[],
+  sshDialogMode: 'create' as 'create' | 'edit',
+  sshDialogKey: null as SSHKey | null,
 }
 
 const app = document.querySelector<HTMLDivElement>('#app')
@@ -165,6 +178,10 @@ app.innerHTML = `
             <button class="tab" data-tab="security">
               <span class="menu-title">Security Groups</span>
               <span class="menu-subtitle">安全组</span>
+            </button>
+            <button class="tab" data-tab="ssh">
+              <span class="menu-title">SSH Keys</span>
+              <span class="menu-subtitle">公钥</span>
             </button>
             <button class="tab" data-tab="templates">
               <span class="menu-title">Templates</span>
@@ -208,6 +225,19 @@ app.innerHTML = `
             </div>
           </div>
           <div id="sg-table" class="table-wrap"></div>
+        </section>
+
+        <section id="tab-ssh" class="tab-panel">
+          <div class="panel-head">
+            <div>
+              <h2>SSH Keys</h2>
+              <p>保存常用 SSH 公钥，创建 VM 时直接选择。</p>
+            </div>
+            <div class="panel-actions">
+              <button id="create-ssh-btn" class="btn btn-primary">新增 SSH Key</button>
+            </div>
+          </div>
+          <div id="ssh-table" class="table-wrap"></div>
         </section>
 
         <section id="tab-templates" class="tab-panel">
@@ -267,11 +297,33 @@ app.innerHTML = `
         </select></label>
         <label class="checkbox-row"><input id="vm-uestc" type="checkbox" /> uestc restriction</label>
       </div>
-      <label>SSH Keys<textarea id="vm-sshkeys" class="input textarea" placeholder="one key per line"></textarea></label>
+      <div class="ssh-picker">
+        <div class="section-title-row">
+          <h4>SSH Keys</h4>
+          <button type="button" id="ssh-shortcut-btn" class="btn btn-ghost">管理 SSH Keys</button>
+        </div>
+        <div id="vm-sshkey-list" class="ssh-checklist"></div>
+      </div>
       <label>Shared Usernames<textarea id="vm-shared" class="input textarea" placeholder="one username per line"></textarea></label>
       <div class="dialog-actions">
         <button type="button" class="btn btn-ghost" data-close-dialog="vm-dialog">取消</button>
         <button type="submit" class="btn btn-primary" id="vm-submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="ssh-dialog" class="dialog">
+    <form id="ssh-form" class="dialog-body">
+      <div class="dialog-head">
+        <h3 id="ssh-dialog-title">新增 SSH Key</h3>
+        <button type="button" class="icon-btn" data-close-dialog="ssh-dialog">×</button>
+      </div>
+      <input type="hidden" id="ssh-id" />
+      <label>Name<input id="ssh-name" class="input" /></label>
+      <label>Public Key<textarea id="ssh-key" class="input textarea" placeholder="ssh-ed25519 AAAA..."></textarea></label>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" data-close-dialog="ssh-dialog">取消</button>
+        <button type="submit" class="btn btn-primary" id="ssh-submit">保存</button>
       </div>
     </form>
   </dialog>
@@ -356,19 +408,26 @@ const els = {
   panels: {
     vms: $('#tab-vms'),
     security: $('#tab-security'),
+    ssh: $('#tab-ssh'),
     templates: $('#tab-templates'),
     admin: $('#tab-admin'),
   },
   vmDialog: $('#vm-dialog') as HTMLDialogElement,
+  sshDialog: $('#ssh-dialog') as HTMLDialogElement,
   sgDialog: $('#sg-dialog') as HTMLDialogElement,
   detailDialog: $('#detail-dialog') as HTMLDialogElement,
   ipDialog: $('#ip-dialog') as HTMLDialogElement,
   vmForm: $('#vm-form') as HTMLFormElement,
+  sshForm: $('#ssh-form') as HTMLFormElement,
   sgForm: $('#sg-form') as HTMLFormElement,
   ipForm: $('#ip-form') as HTMLFormElement,
   vmDialogTitle: $('#vm-dialog-title'),
+  sshDialogTitle: $('#ssh-dialog-title'),
   sgDialogTitle: $('#sg-dialog-title'),
   vmMode: $('#vm-mode') as HTMLInputElement,
+  sshId: $('#ssh-id') as HTMLInputElement,
+  sshName: $('#ssh-name') as HTMLInputElement,
+  sshKey: $('#ssh-key') as HTMLTextAreaElement,
   vmId: $('#vm-id') as HTMLInputElement,
   vmCluster: $('#vm-cluster') as HTMLSelectElement,
   vmTemplate: $('#vm-template') as HTMLSelectElement,
@@ -382,9 +441,13 @@ const els = {
   vmSg: $('#vm-sg') as HTMLSelectElement,
   vmPower: $('#vm-power') as HTMLSelectElement,
   vmUESTC: $('#vm-uestc') as HTMLInputElement,
-  vmSshkeys: $('#vm-sshkeys') as HTMLTextAreaElement,
+  vmSSHKeyList: $('#vm-sshkey-list'),
   vmShared: $('#vm-shared') as HTMLTextAreaElement,
   vmSubmit: $('#vm-submit') as HTMLButtonElement,
+  sshSubmit: $('#ssh-submit') as HTMLButtonElement,
+  createSshBtn: $('#create-ssh-btn'),
+  sshShortcutBtn: $('#ssh-shortcut-btn'),
+  sshTable: $('#ssh-table'),
   sgMode: $('#sg-mode') as HTMLInputElement,
   sgName: $('#sg-name') as HTMLInputElement,
   ruleRows: $('#rule-rows'),
@@ -492,8 +555,13 @@ function visibleVm(vm: VM): boolean {
 
 function powerFrom(vm: VM): string {
   const prefer = vm.prefer_status as Record<string, unknown>
-  const power = prefer.power
-  return typeof power === 'string' ? power : 'unknown'
+  const requested = typeof prefer.power === 'string' ? prefer.power : ''
+  if (requested === 'reboot') {
+    return realPowerFrom(vm)
+  }
+  const real = realPowerFrom(vm)
+  if (real && real !== 'unknown') return real
+  return requested || 'unknown'
 }
 
 function realPowerFrom(vm: VM): string {
@@ -600,33 +668,41 @@ function renderVmTable() {
     return
   }
   els.vmTable.innerHTML = `
-    <table>
-      <thead>
-        <tr>
-          <th>名称</th><th>Owner</th><th>Cluster</th><th>VMID</th><th>IP</th><th>SG</th><th>Sync</th><th>Power</th><th>更新时间</th><th></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${filtered
-          .map(
-            (vm) => `
-            <tr data-vm-id="${vm.id}">
-              <td class="strong">${escapeHtml(vm.vmname)}</td>
-              <td>${escapeHtml(vm.owner_username)}</td>
-              <td>${escapeHtml(vm.cluster_key)}</td>
-              <td>${vm.vmid}</td>
-              <td class="mono">${escapeHtml(vm.ip)}</td>
-              <td>${escapeHtml(vm.security_group_name)}</td>
-              <td>${statusBadge(vm.sync_state)}</td>
-              <td>${escapeHtml(powerFrom(vm))}</td>
-              <td>${escapeHtml(formatTime(vm.updated_at))}</td>
-              <td>${rowActions(vm)}</td>
-            </tr>
+    <div class="vm-list">
+      <div class="vm-list-head">
+        <span>名称</span>
+        <span>Owner</span>
+        <span>Cluster</span>
+        <span>VMID</span>
+        <span>IP</span>
+        <span>SG</span>
+        <span>Sync</span>
+        <span>Power</span>
+        <span>更新时间</span>
+      </div>
+      ${filtered
+        .map(
+          (vm) => `
+            <section class="vm-card" data-vm-id="${vm.id}">
+              <div class="vm-card-main">
+                <div class="strong vm-card-name">${escapeHtml(vm.vmname)}</div>
+                <div>${escapeHtml(vm.owner_username)}</div>
+                <div>${escapeHtml(vm.cluster_key)}</div>
+                <div>${vm.vmid}</div>
+                <div class="mono">${escapeHtml(vm.ip)}</div>
+                <div>${escapeHtml(vm.security_group_name)}</div>
+                <div>${statusBadge(vm.sync_state)}</div>
+                <div>${escapeHtml(powerFrom(vm))}</div>
+                <div>${escapeHtml(formatTime(vm.updated_at))}</div>
+              </div>
+              <div class="vm-card-actions">
+                ${rowActions(vm)}
+              </div>
+            </section>
           `,
-          )
-          .join('')}
-      </tbody>
-    </table>
+        )
+        .join('')}
+    </div>
   `
 }
 
@@ -662,6 +738,83 @@ function renderSecurityGroups() {
       </tbody>
     </table>
   `
+}
+
+function shortKey(key: string): string {
+  const compact = key.replace(/\s+/g, ' ').trim()
+  return compact.length > 96 ? `${compact.slice(0, 96)}…` : compact
+}
+
+function canonicalSSHKeyLine(value: string): string {
+  return value
+    .replace(/\r/g, '')
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .join(' ')
+}
+
+function renderSSHKeys() {
+  const keys = state.sshKeys
+  if (!keys.length) {
+    els.sshTable.innerHTML = `<div class="empty">还没有 SSH Key。先新增一条，再回到 VM 创建里勾选。</div>`
+    renderVmSSHKeyPicker()
+    return
+  }
+  els.sshTable.innerHTML = `
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Public Key</th><th>Updated</th><th></th></tr>
+      </thead>
+      <tbody>
+        ${keys
+          .map(
+            (key) => `
+              <tr data-ssh-id="${key.id}">
+                <td class="strong">${escapeHtml(key.name)}</td>
+                <td class="mono">${escapeHtml(shortKey(key.public_key))}</td>
+                <td>${escapeHtml(formatTime(key.updated_at))}</td>
+                <td>
+                  <div class="row-actions">
+                    <button class="btn btn-mini btn-danger" data-ssh-action="delete" data-id="${key.id}">删除</button>
+                  </div>
+                </td>
+              </tr>
+            `,
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `
+  renderVmSSHKeyPicker()
+}
+
+function renderVmSSHKeyPicker() {
+  const selected = new Set<string>()
+  if (state.vmDialogVm) {
+    for (const key of state.vmDialogVm.sshkeys) {
+      selected.add(canonicalSSHKeyLine(key))
+    }
+  }
+  const keys = state.sshKeys
+  if (!keys.length) {
+    els.vmSSHKeyList.innerHTML = `<div class="empty compact">没有可选 SSH Key。</div>`
+    return
+  }
+  els.vmSSHKeyList.innerHTML = keys
+    .map((key) => {
+      const checked = selected.has(canonicalSSHKeyLine(key.public_key)) ? 'checked' : ''
+      return `
+        <label class="ssh-item">
+          <input type="checkbox" data-ssh-key-id="${key.id}" ${checked} />
+          <span>
+            <span class="ssh-name">${escapeHtml(key.name)}</span>
+            <span class="ssh-key mono">${escapeHtml(shortKey(key.public_key))}</span>
+          </span>
+        </label>
+      `
+    })
+    .join('')
 }
 
 function renderTemplates() {
@@ -838,6 +991,7 @@ function renderVmFormOptions() {
     }
     els.vmUESTC.disabled = network.uestc === 'force'
   }
+  renderVmSSHKeyPicker()
 }
 
 function parseLines(text: string): string[] {
@@ -845,6 +999,14 @@ function parseLines(text: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
+}
+
+function selectedSSHKeyIDs(): number[] {
+  const nodes = Array.from(els.vmSSHKeyList.querySelectorAll<HTMLInputElement>('input[type="checkbox"][data-ssh-key-id]'))
+  return nodes
+    .filter((node) => node.checked)
+    .map((node) => Number(node.dataset.sshKeyId))
+    .filter((value) => Number.isFinite(value) && value > 0)
 }
 
 function resetVmDialog() {
@@ -856,7 +1018,6 @@ function resetVmDialog() {
   els.vmMemoryGB.value = '1'
   els.vmDiskGB.value = '20'
   els.vmPower.value = 'running'
-  els.vmSshkeys.value = ''
   els.vmShared.value = ''
   els.vmUESTC.checked = false
   els.vmUESTC.disabled = false
@@ -885,8 +1046,8 @@ function fillVmDialog(vm: VM) {
   els.vmPower.value = String(vm.prefer_status.power ?? 'running')
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
-  els.vmSshkeys.value = vm.sshkeys.join('\n')
   els.vmShared.value = vm.shared_usernames.join('\n')
+  renderVmSSHKeyPicker()
 }
 
 function openVmDialog(mode: 'create' | 'edit', vm?: VM) {
@@ -969,10 +1130,39 @@ function openSgDialog(mode: 'create' | 'edit', group?: SecurityGroup) {
   showDialog(els.sgDialog)
 }
 
+function resetSSHDialog() {
+  state.sshDialogMode = 'create'
+  state.sshDialogKey = null
+  els.sshDialogTitle.textContent = '新增 SSH Key'
+  els.sshId.value = ''
+  els.sshName.value = ''
+  els.sshKey.value = ''
+}
+
+function fillSSHDialog(key: SSHKey) {
+  state.sshDialogMode = 'edit'
+  state.sshDialogKey = key
+  els.sshDialogTitle.textContent = `编辑 SSH Key #${key.id}`
+  els.sshId.value = String(key.id)
+  els.sshName.value = key.name
+  els.sshKey.value = key.public_key
+}
+
+function openSSHDialog(mode: 'create' | 'edit', key?: SSHKey) {
+  if (mode === 'create') {
+    resetSSHDialog()
+  } else if (key) {
+    fillSSHDialog(key)
+  }
+  showDialog(els.sshDialog)
+}
+
 function renderDetail(vm: VM) {
-  const pretty = (value: unknown) => escapeHtml(JSON.stringify(value, null, 2))
   const deleteInfo = isDeletePending(vm)
     ? `<div><span class="label">删除时间</span><div>${escapeHtml(formatTime(vm.delete_execute_after))}</div></div>`
+    : ''
+  const passwordBlock = vm.password
+    ? `<div class="detail-block"><h4>Login Password</h4><div class="mono password-value">${escapeHtml(vm.password)}</div></div>`
     : ''
   els.detailContent.innerHTML = `
     <div class="detail-grid">
@@ -986,19 +1176,25 @@ function renderDetail(vm: VM) {
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
       ${deleteInfo}
     </div>
+    ${passwordBlock}
     <div class="detail-block">
-      <h4>Prefer Status</h4>
-      <pre>${pretty(vm.prefer_status)}</pre>
-    </div>
-    <div class="detail-block">
-      <h4>Real Status</h4>
-      <pre>${pretty(vm.real_status)}</pre>
+      <h4>状态概览</h4>
+      <div class="detail-grid compact">
+        <div><span class="label">同步</span><div>${statusBadge(vm.sync_state)}</div></div>
+        <div><span class="label">实际电源</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
+        <div><span class="label">版本</span><div>${vm.version}</div></div>
+        <div><span class="label">管理</span><div>${vm.managed ? '受管' : '不受管'}</div></div>
+      </div>
     </div>
   `
 }
 
 function currentVmById(id: number): VM | undefined {
   return state.vms.find((vm) => vm.id === id) ?? state.allVMs.find((vm) => vm.id === id)
+}
+
+function currentSSHKeyById(id: number): SSHKey | undefined {
+  return state.sshKeys.find((key) => key.id === id)
 }
 
 async function loadMe() {
@@ -1025,6 +1221,12 @@ async function loadSecurityGroups() {
   const data = await api<{ items: SecurityGroup[] }>('/api/security-groups')
   state.securityGroups = data.items
   renderSecurityGroups()
+}
+
+async function loadSSHKeys() {
+  const data = await api<{ items: SSHKey[] }>('/api/ssh-keys')
+  state.sshKeys = data.items
+  renderSSHKeys()
 }
 
 async function loadTemplates() {
@@ -1066,6 +1268,9 @@ async function loadActiveTab() {
     case 'security':
       await loadSecurityGroups()
       break
+    case 'ssh':
+      await loadSSHKeys()
+      break
     case 'templates':
       await loadTemplates()
       break
@@ -1081,7 +1286,7 @@ async function loadActiveTab() {
 
 async function prepareVmDialogData() {
   await loadOptions()
-  await Promise.all([loadSecurityGroups(), loadTemplates()])
+  await Promise.all([loadSecurityGroups(), loadSSHKeys(), loadTemplates()])
   renderVmFormOptions()
 }
 
@@ -1096,7 +1301,7 @@ function buildCreateVmPayload(): Record<string, unknown> {
     disk_gb: Number(els.vmDiskGB.value),
     bridge_key: els.vmBridgeKey.value,
     template_vmid: Number(els.vmTemplate.value),
-    sshkeys: parseLines(els.vmSshkeys.value),
+    ssh_key_ids: selectedSSHKeyIDs(),
     shared_usernames: parseLines(els.vmShared.value),
     security_group_name: els.vmSg.value,
     uestc_restricted: els.vmUESTC.checked,
@@ -1118,7 +1323,7 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
     disk_gb: Number(els.vmDiskGB.value),
     bridge_key: els.vmBridgeKey.value,
     template_vmid: Number(els.vmTemplate.value),
-    sshkeys: parseLines(els.vmSshkeys.value),
+    ssh_key_ids: selectedSSHKeyIDs(),
     shared_usernames: parseLines(els.vmShared.value),
     security_group_name: els.vmSg.value,
     uestc_restricted: els.vmUESTC.checked,
@@ -1198,6 +1403,32 @@ async function submitSgForm(event: SubmitEvent) {
   }
 }
 
+async function submitSSHForm(event: SubmitEvent) {
+  event.preventDefault()
+  try {
+    const payload = {
+      name: els.sshName.value.trim(),
+      public_key: els.sshKey.value.trim(),
+    }
+    if (state.sshDialogMode === 'create') {
+      await api('/api/ssh-keys', { method: 'POST', body: JSON.stringify(payload) })
+      flash('SSH Key 已创建。', 'ok')
+    } else if (state.sshDialogKey) {
+      flash('SSH Key 暂不支持编辑，请删除后重新新增。', 'info')
+      closeDialog('ssh-dialog')
+      return
+    }
+    closeDialog('ssh-dialog')
+    state.sshKeys = []
+    await loadSSHKeys()
+    if (state.vmDialogVm) {
+      renderVmSSHKeyPicker()
+    }
+  } catch (err) {
+    flash((err as Error).message, 'error')
+  }
+}
+
 async function submitIpForm(event: SubmitEvent) {
   event.preventDefault()
   try {
@@ -1259,9 +1490,14 @@ async function patchVmPower(id: number, power: string) {
   }
 }
 
-function openVmDetails(vm: VM) {
-  renderDetail(vm)
-  els.detailDialog.showModal()
+async function openVmDetails(vm: VM) {
+  try {
+    const detail = await api<VM>(`/api/vms/${vm.id}`)
+    renderDetail(detail)
+    els.detailDialog.showModal()
+  } catch (err) {
+    flash((err as Error).message, 'error')
+  }
 }
 
 function bindEvents() {
@@ -1312,10 +1548,20 @@ function bindEvents() {
     state.sgDialogGroup = null
     openSgDialog('create')
   })
+  els.createSshBtn.addEventListener('click', () => {
+    state.sshDialogKey = null
+    openSSHDialog('create')
+  })
+  els.sshShortcutBtn.addEventListener('click', () => {
+    state.activeTab = 'ssh'
+    renderTabs()
+    void loadActiveTab()
+  })
   els.vmCluster.addEventListener('change', () => {
     renderVmFormOptions()
   })
   els.vmForm.addEventListener('submit', submitVmForm)
+  els.sshForm.addEventListener('submit', submitSSHForm)
   els.sgForm.addEventListener('submit', submitSgForm)
   els.ipForm.addEventListener('submit', submitIpForm)
   els.addRuleBtn.addEventListener('click', () => addRuleRow())
@@ -1334,7 +1580,7 @@ function bindEvents() {
       if (!vm) return
       switch (vmAction.dataset.action) {
         case 'detail':
-          openVmDetails(vm)
+          await openVmDetails(vm)
           break
         case 'edit':
           try {
@@ -1361,6 +1607,27 @@ function bindEvents() {
           els.ipVmId.value = String(vm.id)
           els.ipValue.value = vm.ip
           els.ipDialog.showModal()
+          break
+      }
+      return
+    }
+
+    const sshAction = target.closest<HTMLElement>('[data-ssh-action]')
+    if (sshAction) {
+      const id = Number(sshAction.dataset.id)
+      const key = currentSSHKeyById(id)
+      if (!key) return
+      switch (sshAction.dataset.sshAction) {
+        case 'delete':
+          if (!confirm(`删除 SSH Key "${key.name}" 吗？`)) return
+          try {
+            await api(`/api/ssh-keys/${id}`, { method: 'DELETE' })
+            flash('SSH Key 已删除。', 'ok')
+            state.sshKeys = state.sshKeys.filter((item) => item.id !== id)
+            renderSSHKeys()
+          } catch (err) {
+            flash((err as Error).message, 'error')
+          }
           break
       }
       return

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ type createVMRequest struct {
 	BridgeKey         string   `json:"bridge_key"`
 	TemplateVMID      int      `json:"template_vmid"`
 	SSHKeys           []string `json:"sshkeys"`
+	SSHKeyIDs         []int64  `json:"ssh_key_ids"`
 	SharedUsernames   []string `json:"shared_usernames"`
 	SecurityGroupName string   `json:"security_group_name"`
 	UESTCRestricted   *bool    `json:"uestc_restricted"`
@@ -40,6 +42,7 @@ type patchVMRequest struct {
 	BridgeKey         *string   `json:"bridge_key"`
 	TemplateVMID      *int      `json:"template_vmid"`
 	SSHKeys           *[]string `json:"sshkeys"`
+	SSHKeyIDs         *[]int64  `json:"ssh_key_ids"`
 	SharedUsernames   *[]string `json:"shared_usernames"`
 	SecurityGroupName *string   `json:"security_group_name"`
 	UESTCRestricted   *bool     `json:"uestc_restricted"`
@@ -47,6 +50,11 @@ type patchVMRequest struct {
 }
 
 type createVMResponse struct {
+	VM
+	Password string `json:"password"`
+}
+
+type vmDetailResponse struct {
 	VM
 	Password string `json:"password"`
 }
@@ -114,7 +122,33 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	writeJSON(w, http.StatusOK, vm)
+	writeJSON(w, http.StatusOK, vmDetailResponse{
+		VM: VM{
+			ID:                 vm.ID,
+			OwnerUsername:      vm.OwnerUsername,
+			ClusterKey:         vm.ClusterKey,
+			VMID:               vm.VMID,
+			VMName:             vm.VMName,
+			IP:                 vm.IP,
+			SSHKeys:            vm.SSHKeys,
+			SharedUsernames:    vm.SharedUsernames,
+			SecurityGroupName:  vm.SecurityGroupName,
+			UESTCRestricted:    vm.UESTCRestricted,
+			Managed:            vm.Managed,
+			Config:             vm.Config,
+			PreferStatus:       vm.PreferStatus,
+			RealStatus:         vm.RealStatus,
+			SyncState:          vm.SyncState,
+			SyncError:          vm.SyncError,
+			Version:            vm.Version,
+			CreatedAt:          vm.CreatedAt,
+			UpdatedAt:          vm.UpdatedAt,
+			DeletedAt:          vm.DeletedAt,
+			DeleteRequestedAt:  vm.DeleteRequestedAt,
+			DeleteExecuteAfter: vm.DeleteExecuteAfter,
+		},
+		Password: vm.Password,
+	})
 }
 
 func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
@@ -154,6 +188,25 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.SSHKeys) == 0 {
 		req.SSHKeys = []string{}
+	}
+	if len(req.SSHKeyIDs) > 0 {
+		sshKeys, err := s.loadSSHKeysByIDs(r.Context(), current.Username, req.SSHKeyIDs)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				s.jsonError(w, http.StatusBadRequest, "ssh key not found")
+				return
+			}
+			s.jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.SSHKeys = sshKeys
+	} else {
+		if normalized, err := normalizeSSHKeyList(req.SSHKeys); err != nil {
+			s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid ssh key: %v", err))
+			return
+		} else {
+			req.SSHKeys = normalized
+		}
 	}
 	req.VMName = prefixedVMName(current.Username, req.VMName)
 	req.SharedUsernames = normalizeStringList(req.SharedUsernames)
@@ -246,7 +299,25 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		chooseUESTC = true
 	}
 
-	vmid, err := s.nextClusterVMID(r.Context(), req.ClusterKey, cluster.StartVMID, cluster.Limit)
+	conn, err := s.db.Conn(r.Context())
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(r.Context(), "BEGIN IMMEDIATE"); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	vmid, err := nextClusterVMID(r.Context(), conn, req.ClusterKey, cluster.StartVMID, cluster.Limit)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -313,14 +384,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		uestcRestricted = 1
 	}
 
-	tx, err := s.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		s.jsonError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	res, err := tx.ExecContext(r.Context(), `
+	res, err := conn.ExecContext(r.Context(), `
 		INSERT INTO vms(
 			owner_username, cluster_key, vmid, vmname, ip, password,
 			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
@@ -337,12 +401,13 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(r.Context(), "COMMIT"); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	committed = true
 
-	vm, err := s.loadVMRow(r.Context(), id)
+	vm, err := loadVMRow(r.Context(), conn, id)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -417,7 +482,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	}
 	sharedOnly := current.Username != vm.OwnerUsername && !current.IsAdmin
 	if sharedOnly {
-		if req.VMName != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
+		if req.VMName != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SSHKeyIDs != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
 			s.jsonError(w, http.StatusForbidden, "shared users can only change power")
 			return
 		}
@@ -441,8 +506,26 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		prefer["vmname"] = vm.VMName
 		changed = true
 	}
-	if req.SSHKeys != nil && !sharedOnly {
-		vm.SSHKeys = normalizeStringList(*req.SSHKeys)
+	if (req.SSHKeys != nil || req.SSHKeyIDs != nil) && !sharedOnly {
+		if req.SSHKeyIDs != nil {
+			if len(*req.SSHKeyIDs) == 0 {
+				vm.SSHKeys = []string{}
+			} else {
+				keys, err := s.loadSSHKeysByIDs(r.Context(), current.Username, *req.SSHKeyIDs)
+				if err != nil {
+					s.jsonError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				vm.SSHKeys = keys
+			}
+		} else if req.SSHKeys != nil {
+			normalized, err := normalizeSSHKeyList(*req.SSHKeys)
+			if err != nil {
+				s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid ssh key: %v", err))
+				return
+			}
+			vm.SSHKeys = normalized
+		}
 		cfg["sshkeys"] = vm.SSHKeys
 		prefer["sshkeys"] = vm.SSHKeys
 		changed = true

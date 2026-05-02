@@ -166,13 +166,31 @@ func (c *Client) ListVMResources(ctx context.Context, clusterKey string) ([]Reso
 }
 
 func (c *Client) ListVMSnapshots(ctx context.Context, clusterKey, node string, vmid int) ([]Snapshot, error) {
-	var resp struct {
-		Snapshots []Snapshot `json:"snapshots"`
-	}
-	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot", url.PathEscape(node), vmid), nil, &resp); err != nil {
+	var raw json.RawMessage
+	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot", url.PathEscape(node), vmid), nil, &raw); err != nil {
 		return nil, err
 	}
-	return resp.Snapshots, nil
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	if raw[0] == '[' {
+		var snaps []Snapshot
+		if err := json.Unmarshal(raw, &snaps); err != nil {
+			return nil, err
+		}
+		return snaps, nil
+	}
+	var resp struct {
+		Snapshots []Snapshot `json:"snapshots"`
+		Data      []Snapshot `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Snapshots) > 0 {
+		return resp.Snapshots, nil
+	}
+	return resp.Data, nil
 }
 
 func (c *Client) DeleteVMSnapshot(ctx context.Context, clusterKey, node string, vmid int, snapName string) error {
@@ -239,12 +257,15 @@ func (c *Client) GetVMConfig(ctx context.Context, clusterKey, node string, vmid 
 	return cfg, nil
 }
 
-func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode string, templateVMID int, targetNode string, newVMID int, name string, storage string) error {
+func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode string, templateVMID int, targetNode string, newVMID int, name string, storage string, pool string) error {
 	params := url.Values{
 		"newid":   {strconv.Itoa(newVMID)},
 		"name":    {name},
 		"full":    {"1"},
 		"storage": {storage},
+	}
+	if pool != "" {
+		params.Set("pool", pool)
 	}
 	if targetNode != "" && targetNode != templateNode {
 		params.Set("target", targetNode)
@@ -261,14 +282,14 @@ func (c *Client) SetVMConfig(ctx context.Context, clusterKey, node string, vmid 
 	return c.request(ctx, clusterKey, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/config", url.PathEscape(node), vmid), params, &out)
 }
 
-func (c *Client) ResizeDisk(ctx context.Context, clusterKey, node string, vmid int, disk string, addGB int) error {
-	if addGB <= 0 {
+func (c *Client) ResizeDisk(ctx context.Context, clusterKey, node string, vmid int, disk string, addMiB int) error {
+	if addMiB <= 0 {
 		return nil
 	}
 	var upid string
 	params := url.Values{
 		"disk": {disk},
-		"size": {fmt.Sprintf("+%dG", addGB)},
+		"size": {fmt.Sprintf("+%dM", addMiB)},
 	}
 	if err := c.request(ctx, clusterKey, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/resize", url.PathEscape(node), vmid), params, &upid); err != nil {
 		return err
@@ -313,7 +334,7 @@ func (c *Client) DeleteVM(ctx context.Context, clusterKey, node string, vmid int
 }
 
 func (c *Client) EnsureFirewall(ctx context.Context, clusterKey, node string, vmid int, spec FirewallSpec) error {
-	if err := c.ensureSecurityGroup(ctx, clusterKey, spec.UserGroupName, spec.Rules); err != nil {
+	if err := c.applyVMFirewallRules(ctx, clusterKey, node, vmid, spec.Rules); err != nil {
 		return err
 	}
 	if err := c.request(ctx, clusterKey, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/firewall/options", url.PathEscape(node), vmid), url.Values{

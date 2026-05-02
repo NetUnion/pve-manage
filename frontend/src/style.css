@@ -528,6 +528,62 @@ th {
   padding-top: 28px;
 }
 
+.section-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 10px;
+}
+
+.section-title-row h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.ssh-picker {
+  margin: 14px 0 12px;
+}
+
+.ssh-checklist {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+}
+
+.ssh-item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+
+.ssh-item input {
+  margin-top: 4px;
+}
+
+.ssh-name {
+  display: block;
+  font-weight: 600;
+}
+
+.ssh-key {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
 .rule-head {
   display: flex;
   justify-content: space-between;

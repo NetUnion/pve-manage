@@ -17,6 +17,7 @@ import (
 
 	"cloud-manage/internal/config"
 	"cloud-manage/internal/model"
+	"golang.org/x/crypto/ssh"
 )
 
 var (
@@ -69,6 +70,15 @@ type securityGroupSummary struct {
 	Rules         json.RawMessage `json:"rules"`
 	CreatedAt     string          `json:"created_at"`
 	UpdatedAt     string          `json:"updated_at"`
+}
+
+type sshKeySummary struct {
+	ID            int64  `json:"id"`
+	OwnerUsername string `json:"owner_username"`
+	Name          string `json:"name"`
+	PublicKey     string `json:"public_key"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 type templateSummary struct {
@@ -145,6 +155,39 @@ func normalizeStringList(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func normalizeSSHKeyList(values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		line, err := normalizeSSHKeyLine(value)
+		if err != nil {
+			return nil, err
+		}
+		if line == "" {
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func normalizeSSHKeyLine(value string) (string, error) {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\r", ""))
+	if value == "" || strings.HasPrefix(value, "#") {
+		return "", nil
+	}
+	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(value))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), nil
 }
 
 func validSecurityGroupName(name string) bool {
@@ -237,6 +280,15 @@ func randomPassword(n int) string {
 		out[i] = alphabet[v.Int64()]
 	}
 	return string(out)
+}
+
+func isSQLiteUniqueConstraintError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed: vms.cluster_key, vms.vmid") ||
+		strings.Contains(msg, "UNIQUE constraint failed")
 }
 
 func boolToInt(v bool) int {
@@ -399,8 +451,12 @@ func (s *Server) clusterVMCounts(ctx context.Context, clusterKey string) (int, e
 	return count, nil
 }
 
-func (s *Server) nextClusterVMID(ctx context.Context, clusterKey string, startVMID, limit int) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `
+type vmIDQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func nextClusterVMID(ctx context.Context, q vmIDQuerier, clusterKey string, startVMID, limit int) (int, error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT vmid
 		FROM vms
 		WHERE cluster_key = ? AND deleted_at IS NULL
@@ -428,6 +484,10 @@ func (s *Server) nextClusterVMID(ctx context.Context, clusterKey string, startVM
 	return 0, fmt.Errorf("no vmid available in cluster %s", clusterKey)
 }
 
+func (s *Server) nextClusterVMID(ctx context.Context, clusterKey string, startVMID, limit int) (int, error) {
+	return nextClusterVMID(ctx, s.db, clusterKey, startVMID, limit)
+}
+
 func (s *Server) deriveIPv4(cluster config.Cluster, bridgeKey string, vmid int) (string, error) {
 	bridge, ok := cluster.BridgeByKey(bridgeKey)
 	if !ok {
@@ -446,7 +506,15 @@ func (s *Server) deriveIPv4(cluster config.Cluster, bridgeKey string, vmid int) 
 }
 
 func (s *Server) loadVMRow(ctx context.Context, id int64) (*vmSummary, error) {
-	row := s.db.QueryRowContext(ctx, `
+	return loadVMRow(ctx, s.db, id)
+}
+
+type vmRowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error) {
+	row := q.QueryRowContext(ctx, `
 		SELECT id, owner_username, cluster_key, vmid, vmname, ip, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
@@ -551,6 +619,66 @@ func (s *Server) loadTemplateRow(ctx context.Context, clusterKey string, templat
 	}
 	item.RealStatus = rawJSONFromString(realRaw)
 	return &item, nil
+}
+
+func (s *Server) loadSSHKeyRow(ctx context.Context, ownerUsername string, id int64) (*sshKeySummary, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, owner_username, name, public_key, created_at, updated_at
+		FROM ssh_keys
+		WHERE owner_username = ? AND id = ?
+	`, ownerUsername, id)
+
+	var item sshKeySummary
+	if err := row.Scan(&item.ID, &item.OwnerUsername, &item.Name, &item.PublicKey, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
+func (s *Server) loadSSHKeyRows(ctx context.Context, ownerUsername string) ([]sshKeySummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, owner_username, name, public_key, created_at, updated_at
+		FROM ssh_keys
+		WHERE owner_username = ?
+		ORDER BY name, id
+	`, ownerUsername)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]sshKeySummary, 0)
+	for rows.Next() {
+		var item sshKeySummary
+		if err := rows.Scan(&item.ID, &item.OwnerUsername, &item.Name, &item.PublicKey, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Server) loadSSHKeysByIDs(ctx context.Context, ownerUsername string, ids []int64) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		item, err := s.loadSSHKeyRow(ctx, ownerUsername, id)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, item.PublicKey)
+	}
+	return normalizeSSHKeyList(keys)
 }
 
 func (s *Server) visibleSecurityGroup(ctx context.Context, ownerUsername, name string, current *model.User) (*securityGroupSummary, error) {

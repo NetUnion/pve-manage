@@ -94,6 +94,72 @@ CREATE TABLE IF NOT EXISTS vms (
 ALTER TABLE vms ADD COLUMN managed INTEGER NOT NULL DEFAULT 1;
 `,
 	},
+	{
+		Version: 3,
+		Name:    "active_vm_unique_index",
+		SQL: `
+CREATE TABLE vms_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_username TEXT NOT NULL,
+    cluster_key TEXT NOT NULL,
+    vmid INTEGER NOT NULL,
+    vmname TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    password TEXT NOT NULL,
+    sshkeys_json TEXT NOT NULL,
+    shared_usernames_json TEXT NOT NULL,
+    security_group_name TEXT NOT NULL,
+    uestc_restricted INTEGER NOT NULL DEFAULT 0,
+    config_json TEXT NOT NULL,
+    prefer_status_json TEXT NOT NULL,
+    real_status_json TEXT NOT NULL,
+    sync_state TEXT NOT NULL,
+    sync_error TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    delete_requested_at TEXT,
+    delete_execute_after TEXT,
+    managed INTEGER NOT NULL DEFAULT 1
+);
+
+INSERT INTO vms_new(
+    id, owner_username, cluster_key, vmid, vmname, ip, password,
+    sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
+    config_json, prefer_status_json, real_status_json, sync_state, sync_error,
+    version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after, managed
+)
+SELECT
+    id, owner_username, cluster_key, vmid, vmname, ip, password,
+    sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
+    config_json, prefer_status_json, real_status_json, sync_state, sync_error,
+    version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after, managed
+FROM vms;
+
+DROP TABLE vms;
+ALTER TABLE vms_new RENAME TO vms;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_active_cluster_vmid
+    ON vms(cluster_key, vmid)
+    WHERE deleted_at IS NULL;
+`,
+	},
+	{
+		Version: 4,
+		Name:    "ssh_keys_table",
+		SQL: `
+CREATE TABLE IF NOT EXISTS ssh_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_username TEXT NOT NULL,
+    name TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner_username, name),
+    UNIQUE(owner_username, public_key)
+);
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

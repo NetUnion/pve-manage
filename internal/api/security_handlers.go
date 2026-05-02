@@ -151,7 +151,14 @@ func (s *Server) handlePatchSecurityGroup(w http.ResponseWriter, r *http.Request
 		return
 	}
 	now := timestamp()
-	res, err := s.db.ExecContext(r.Context(), `
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(r.Context(), `
 		UPDATE security_groups
 		SET rules_json = ?, updated_at = ?
 		WHERE owner_username = ? AND name = ?
@@ -160,11 +167,31 @@ func (s *Server) handlePatchSecurityGroup(w http.ResponseWriter, r *http.Request
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if affected, _ := res.RowsAffected(); affected == 0 {
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
 		s.jsonError(w, http.StatusNotFound, "security group not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET sync_state = 'pending',
+		    sync_error = NULL,
+		    updated_at = ?,
+		    version = version + 1
+		WHERE owner_username = ?
+		  AND security_group_name = ?
+		  AND deleted_at IS NULL
+		  AND managed = 1
+		  AND sync_state != 'deleting'
+	`, now, current.Username, name); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "requeued": true})
 }
 
 func (s *Server) handleDeleteSecurityGroup(w http.ResponseWriter, r *http.Request) {

@@ -7,15 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"cloud-manage/internal/config"
 	"cloud-manage/internal/pve"
+	"golang.org/x/crypto/ssh"
 )
 
 type Worker struct {
@@ -266,9 +269,6 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 			return err
 		}
 	}
-	if err := w.ensurePoolMembership(ctx, vm); err != nil {
-		return err
-	}
 	if err := w.configureVM(ctx, vm, prefer, cluster, node); err != nil {
 		return err
 	}
@@ -277,6 +277,14 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 	}
 	status, _ := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
 	power, _ := status["status"].(string)
+	switch stringFrom(prefer, "power", "running") {
+	case "reboot":
+		power = "running"
+	case "running", "stopped":
+		if power == "" {
+			power = stringFrom(prefer, "power", "unknown")
+		}
+	}
 	if power == "" {
 		power = stringFrom(prefer, "power", "unknown")
 	}
@@ -316,7 +324,11 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 	if storage == "" {
 		return "", fmt.Errorf("storage_key is required")
 	}
-	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, targetNode, vm.VMID, vm.VMName, storage); err != nil {
+	poolID := userPoolID(vm.OwnerUsername)
+	if err := w.pve.EnsurePool(ctx, vm.ClusterKey, poolID); err != nil {
+		return "", err
+	}
+	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, targetNode, vm.VMID, vm.VMName, storage, poolID); err != nil {
 		return "", err
 	}
 	if node, ok, err := w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID); err != nil {
@@ -330,14 +342,6 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 	return template.Node, nil
 }
 
-func (w *Worker) ensurePoolMembership(ctx context.Context, vm vmRow) error {
-	poolID := userPoolID(vm.OwnerUsername)
-	if err := w.pve.EnsurePool(ctx, vm.ClusterKey, poolID); err != nil {
-		return err
-	}
-	return w.pve.SetPoolVMs(ctx, vm.ClusterKey, poolID, vm.VMID)
-}
-
 func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]any, cluster config.Cluster, node string) error {
 	bridgeKey := stringFrom(prefer, "bridge_key", "custom")
 	bridge, ok := cluster.BridgeByKey(bridgeKey)
@@ -348,23 +352,7 @@ func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]an
 	if err != nil {
 		return err
 	}
-	params := url.Values{
-		"name":       {vm.VMName},
-		"cores":      {strconv.Itoa(intFrom(prefer, "cpu_cores"))},
-		"memory":     {strconv.Itoa(intFrom(prefer, "memory_gb") * 1024)},
-		"ciuser":     {"root"},
-		"cipassword": {vm.Password},
-		"ipconfig0":  {fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway)},
-		"agent":      {"enabled=1"},
-	}
-	sshKeys := parseJSONStrings(vm.SSHKeysJSON)
-	if len(sshKeys) > 0 {
-		params.Set("sshkeys", strings.Join(sshKeys, "\n"))
-	}
-	if net0 := rewriteNet0(cfg["net0"], bridgeKey); net0 != "" {
-		params.Set("net0", net0)
-	}
-	if err := w.pve.SetVMConfig(ctx, vm.ClusterKey, node, vm.VMID, params); err != nil {
+	if err := w.applyVMConfigIfNeeded(ctx, vm, prefer, bridgeKey, bridge, cfg, node); err != nil {
 		return err
 	}
 	if err := w.resizeDisk(ctx, vm, prefer, cfg, node); err != nil {
@@ -373,19 +361,152 @@ func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]an
 	return w.syncFirewall(ctx, vm, prefer, bridge, node)
 }
 
+func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map[string]any, bridgeKey string, bridge config.BridgeConfig, cfg map[string]any, node string) error {
+	params := url.Values{}
+	desiredName := vm.VMName
+	if stringFromMap(cfg, "name", "") != desiredName {
+		params.Set("name", desiredName)
+	}
+	if intFromMapAny(cfg, "cores") != intFrom(prefer, "cpu_cores") {
+		params.Set("cores", strconv.Itoa(intFrom(prefer, "cpu_cores")))
+	}
+	if intFromMapAny(cfg, "memory") != intFrom(prefer, "memory_gb")*1024 {
+		params.Set("memory", strconv.Itoa(intFrom(prefer, "memory_gb")*1024))
+	}
+	if stringFromMap(cfg, "ciuser", "") != "root" {
+		params.Set("ciuser", "root")
+	}
+	if stringFromMap(cfg, "cipassword", "") != vm.Password {
+		params.Set("cipassword", vm.Password)
+	}
+	if stringFromMap(cfg, "ipconfig0", "") != fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway) {
+		params.Set("ipconfig0", fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway))
+	}
+	if truthy(cfg["agent"]) {
+		params.Set("agent", "0")
+	}
+	sshKeys, err := normalizeSSHKeyList(parseJSONStrings(vm.SSHKeysJSON))
+	if err != nil {
+		return fmt.Errorf("invalid ssh key list: %w", err)
+	}
+	desiredSSH := strings.Join(sshKeys, "\n")
+	if stringFromMap(cfg, "sshkeys", "") != desiredSSH {
+		if desiredSSH == "" {
+			params.Set("delete", "sshkeys")
+		} else {
+			params.Set("sshkeys", url.PathEscape(desiredSSH))
+		}
+	}
+	if currentNet0, _ := cfg["net0"].(string); currentNet0 != "" {
+		desiredNet0 := rewriteNet0(currentNet0, bridgeKey)
+		if desiredNet0 != "" && currentNet0 != desiredNet0 {
+			params.Set("net0", desiredNet0)
+		}
+	} else {
+		params.Set("net0", fmt.Sprintf("virtio,bridge=%s,firewall=1", bridgeKey))
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return w.pve.SetVMConfig(ctx, vm.ClusterKey, node, vm.VMID, params)
+}
+
+func normalizeSSHKeyList(values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		line, err := normalizeSSHKeyLine(value)
+		if err != nil {
+			return nil, err
+		}
+		if line == "" {
+			continue
+		}
+		if _, ok := seen[line]; ok {
+			continue
+		}
+		seen[line] = struct{}{}
+		out = append(out, line)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func normalizeSSHKeyLine(value string) (string, error) {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\r", ""))
+	if value == "" || strings.HasPrefix(value, "#") {
+		return "", nil
+	}
+	pub, comment, _, _, err := ssh.ParseAuthorizedKey([]byte(value))
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+	if comment != "" {
+		line += " " + comment
+	}
+	return line, nil
+}
+
+func truthy(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case float64:
+		return t != 0
+	case int:
+		return t != 0
+	case string:
+		return t == "1" || strings.EqualFold(t, "true") || strings.EqualFold(t, "yes")
+	default:
+		return false
+	}
+}
+
+func intFromMapAny(obj map[string]any, key string) int {
+	if obj == nil {
+		return 0
+	}
+	v, ok := obj[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	case string:
+		i, _ := strconv.Atoi(n)
+		return i
+	default:
+		return 0
+	}
+}
+
 func (w *Worker) resizeDisk(ctx context.Context, vm vmRow, prefer map[string]any, cfg map[string]any, node string) error {
 	targetGB := intFrom(prefer, "disk_gb")
 	if targetGB <= 0 {
 		return fmt.Errorf("disk_gb is required")
 	}
-	currentGB := diskGB(cfg["scsi0"])
-	if currentGB == 0 {
-		return fmt.Errorf("cannot determine current scsi0 size")
+	diskKey, diskRaw := primaryDiskConfig(cfg)
+	if diskKey == "" {
+		return fmt.Errorf("cannot determine primary disk")
 	}
-	if targetGB < currentGB {
-		return fmt.Errorf("disk resize cannot shrink: current=%dGB target=%dGB", currentGB, targetGB)
+	currentMiB := diskMiB(diskRaw)
+	if currentMiB == 0 {
+		return fmt.Errorf("cannot determine current %s size", diskKey)
 	}
-	return w.pve.ResizeDisk(ctx, vm.ClusterKey, node, vm.VMID, "scsi0", targetGB-currentGB)
+	targetMiB := targetGB * 1024
+	if targetMiB < currentMiB {
+		return fmt.Errorf("disk resize cannot shrink: current=%dMiB target=%dMiB", currentMiB, targetMiB)
+	}
+	return w.pve.ResizeDisk(ctx, vm.ClusterKey, node, vm.VMID, diskKey, targetMiB-currentMiB)
 }
 
 func (w *Worker) syncFirewall(ctx context.Context, vm vmRow, prefer map[string]any, bridge config.BridgeConfig, node string) error {
@@ -393,17 +514,15 @@ func (w *Worker) syncFirewall(ctx context.Context, vm vmRow, prefer map[string]a
 	if err != nil {
 		return err
 	}
-	groupName := fmt.Sprintf("user_%s_%s", vm.OwnerUsername, vm.SecurityGroupName)
-	groups := []string{groupName}
+	var groups []string
 	if boolFrom(prefer, "uestc_restricted") && w.config.Root.Cluster[vm.ClusterKey].Network.UESTC != "" {
-		groups = append([]string{w.config.Root.Cluster[vm.ClusterKey].Network.UESTC}, groups...)
+		groups = append(groups, w.config.Root.Cluster[vm.ClusterKey].Network.UESTC)
 	}
 	ipfilter := append([]string{exactIPv4CIDR(vm.IP)}, bridge.IPFilter...)
 	spec := pve.FirewallSpec{
-		UserGroupName: groupName,
-		Rules:         convertRules(rules),
-		IPFilter:      ipfilter,
-		Groups:        groups,
+		Rules:    convertRules(rules),
+		IPFilter: ipfilter,
+		Groups:   groups,
 	}
 	return w.pve.EnsureFirewall(ctx, vm.ClusterKey, node, vm.VMID, spec)
 }
@@ -411,8 +530,22 @@ func (w *Worker) syncFirewall(ctx context.Context, vm vmRow, prefer map[string]a
 func (w *Worker) applyPower(ctx context.Context, vm vmRow, node string, power string) error {
 	switch power {
 	case "running":
+		status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
+		if err != nil {
+			return err
+		}
+		if stringFromMap(status, "status", "") == "running" {
+			return nil
+		}
 		return w.pve.StartVM(ctx, vm.ClusterKey, node, vm.VMID)
 	case "stopped":
+		status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
+		if err != nil {
+			return err
+		}
+		if stringFromMap(status, "status", "") == "stopped" {
+			return nil
+		}
 		return w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID)
 	case "reboot":
 		return w.pve.RebootVM(ctx, vm.ClusterKey, node, vm.VMID)
@@ -742,6 +875,13 @@ func boolFrom(obj map[string]any, key string) bool {
 	}
 }
 
+func stringFromMap(obj map[string]any, key, fallback string) string {
+	if v, ok := obj[key].(string); ok && v != "" {
+		return v
+	}
+	return fallback
+}
+
 func rewriteNet0(raw any, bridge string) string {
 	current, _ := raw.(string)
 	if current == "" {
@@ -769,28 +909,56 @@ func rewriteNet0(raw any, bridge string) string {
 	return strings.Join(parts, ",")
 }
 
-var sizeRE = regexp.MustCompile(`size=([0-9]+)([KMGTP]?)`)
+var sizeRE = regexp.MustCompile(`(?i)\bsize=([0-9]+(?:\.[0-9]+)?)([KMGTP]?)\b`)
 
-func diskGB(raw any) int {
+func primaryDiskConfig(cfg map[string]any) (string, string) {
+	for _, key := range []string{"scsi0", "virtio0", "sata0", "ide0"} {
+		if raw, ok := cfg[key]; ok {
+			value, _ := raw.(string)
+			if value == "" {
+				continue
+			}
+			if strings.Contains(value, "media=cdrom") {
+				continue
+			}
+			return key, value
+		}
+	}
+	for _, key := range []string{"scsi0", "virtio0", "sata0", "ide0"} {
+		if raw, ok := cfg[key]; ok {
+			value, _ := raw.(string)
+			if value == "" || strings.Contains(value, "media=cdrom") {
+				continue
+			}
+			return key, value
+		}
+	}
+	return "", ""
+}
+
+func diskMiB(raw any) int {
 	value, _ := raw.(string)
 	match := sizeRE.FindStringSubmatch(value)
 	if len(match) != 3 {
 		return 0
 	}
-	n, _ := strconv.Atoi(match[1])
+	n, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return 0
+	}
 	switch strings.ToUpper(match[2]) {
 	case "T":
-		return n * 1024
+		n *= 1024 * 1024
 	case "G", "":
-		return n
+		n *= 1024
 	case "M":
-		if n%1024 == 0 {
-			return n / 1024
-		}
-		return n/1024 + 1
+		// already in MiB
+	case "K":
+		n /= 1024
 	default:
 		return 0
 	}
+	return int(math.Round(n))
 }
 
 func exactIPv4CIDR(ipWithCIDR string) string {
@@ -820,7 +988,11 @@ func timestamp() string {
 
 func isIgnorableBackupScanError(err error) bool {
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unsupported") || strings.Contains(msg, "not configured") || strings.Contains(msg, "content type")
+	return strings.Contains(msg, "unsupported") ||
+		strings.Contains(msg, "not configured") ||
+		strings.Contains(msg, "content type") ||
+		strings.Contains(msg, "not implemented") ||
+		strings.Contains(msg, "status 501")
 }
 
 func userPoolID(username string) string {
