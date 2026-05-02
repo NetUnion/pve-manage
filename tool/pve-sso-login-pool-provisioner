@@ -119,10 +119,24 @@ acl_exists() {
   local userid="$1"
   local path="$2"
 
-  pveum acl list 2>/dev/null | awk -v path="$path" -v userid="$userid" -v role="$ROLE" '
-    $1 == path && $2 == userid && $3 == role { found = 1 }
-    END { exit found ? 0 : 1 }
-  '
+  # PVE's human-readable ACL table is not stable enough to parse by column
+  # number. Use JSON and accept the common field names used by pveum/pvesh.
+  pveum acl list --output-format json 2>/dev/null |
+    perl -MJSON::PP -0777 -e '
+      my ($want_path, $want_userid, $want_role) = @ARGV;
+      my $acls = decode_json(do { local $/; <STDIN> });
+
+      for my $acl (@$acls) {
+        my $path = $acl->{path} // "";
+        my $role = $acl->{roleid} // $acl->{role} // "";
+        my $type = $acl->{type} // "";
+        my $ugid = $acl->{ugid} // $acl->{userid} // $acl->{user} // "";
+
+        exit 0 if $path eq $want_path && $type eq "user" && $ugid eq $want_userid && $role eq $want_role;
+      }
+
+      exit 1;
+    ' "$path" "$userid" "$ROLE"
 }
 
 ensure_user() {
