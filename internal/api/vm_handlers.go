@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ type createVMRequest struct {
 	StorageKey        string   `json:"storage_key"`
 	DiskGB            int      `json:"disk_gb"`
 	BridgeKey         string   `json:"bridge_key"`
+	BootOrder         string   `json:"boot_order"`
 	TemplateVMID      int      `json:"template_vmid"`
 	SSHKeys           []string `json:"sshkeys"`
 	SSHKeyIDs         []int64  `json:"ssh_key_ids"`
@@ -34,6 +36,7 @@ type createVMRequest struct {
 }
 
 type patchVMRequest struct {
+	OwnerUsername     *string   `json:"owner_username"`
 	VMName            *string   `json:"vmname"`
 	Password          *string   `json:"password"`
 	CPUKey            *string   `json:"cpu_key"`
@@ -42,6 +45,7 @@ type patchVMRequest struct {
 	StorageKey        *string   `json:"storage_key"`
 	DiskGB            *int      `json:"disk_gb"`
 	BridgeKey         *string   `json:"bridge_key"`
+	BootOrder         *string   `json:"boot_order"`
 	TemplateVMID      *int      `json:"template_vmid"`
 	SSHKeys           *[]string `json:"sshkeys"`
 	SSHKeyIDs         *[]int64  `json:"ssh_key_ids"`
@@ -49,6 +53,27 @@ type patchVMRequest struct {
 	SecurityGroupName *string   `json:"security_group_name"`
 	UESTCRestricted   *bool     `json:"uestc_restricted"`
 	Power             *string   `json:"power"`
+}
+
+type adoptVMRequest struct {
+	OwnerUsername      string   `json:"owner_username"`
+	VMName             string   `json:"vmname"`
+	IP                 string   `json:"ip"`
+	Password           *string  `json:"password"`
+	CPUKey             string   `json:"cpu_key"`
+	CPUCores           int      `json:"cpu_cores"`
+	MemoryGB           int      `json:"memory_gb"`
+	StorageKey         string   `json:"storage_key"`
+	DiskGB             int      `json:"disk_gb"`
+	BridgeKey          string   `json:"bridge_key"`
+	BootOrder          string   `json:"boot_order"`
+	SSHKeys            []string `json:"sshkeys"`
+	SSHKeyIDs          []int64  `json:"ssh_key_ids"`
+	SharedUsernames    []string `json:"shared_usernames"`
+	SecurityGroupOwner string   `json:"security_group_owner"`
+	SecurityGroupName  string   `json:"security_group_name"`
+	UESTCRestricted    *bool    `json:"uestc_restricted"`
+	Power              string   `json:"power"`
 }
 
 type createVMResponse struct {
@@ -202,6 +227,11 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Power != "running" && req.Power != "stopped" {
 		s.jsonError(w, http.StatusBadRequest, "power must be running or stopped")
+		return
+	}
+	bootOrder, err := normalizeBootOrder(req.BootOrder)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.Password != nil {
@@ -368,6 +398,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		"shared_usernames":    req.SharedUsernames,
 		"security_group_name": req.SecurityGroupName,
 		"uestc_restricted":    chooseUESTC,
+		"boot_order":          bootOrder,
 		"power":               req.Power,
 		"root_user":           "root",
 		"full_clone_storage":  req.StorageKey,
@@ -390,6 +421,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		"shared_usernames":    req.SharedUsernames,
 		"security_group_name": req.SecurityGroupName,
 		"uestc_restricted":    chooseUESTC,
+		"boot_order":          bootOrder,
 	})
 	realJSON, _ := json.Marshal(map[string]any{
 		"intent":         "present",
@@ -514,10 +546,28 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	}
 	sharedOnly := current.Username != vm.OwnerUsername && !current.IsAdmin
 	if sharedOnly {
-		if req.VMName != nil || req.Password != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SSHKeyIDs != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
+		if req.VMName != nil || req.Password != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.BootOrder != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SSHKeyIDs != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
 			s.jsonError(w, http.StatusForbidden, "shared users can only change power")
 			return
 		}
+	}
+
+	targetOwner := vm.OwnerUsername
+	if req.OwnerUsername != nil {
+		if !current.IsAdmin {
+			s.jsonError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+		owner := strings.TrimSpace(*req.OwnerUsername)
+		if owner == "" || !validUsernameLike(owner) {
+			s.jsonError(w, http.StatusBadRequest, "invalid owner_username")
+			return
+		}
+		if _, err := s.loadUserRow(r.Context(), owner); err != nil {
+			s.jsonError(w, http.StatusBadRequest, "owner user not found")
+			return
+		}
+		targetOwner = owner
 	}
 
 	cfg := map[string]any{}
@@ -537,8 +587,25 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusBadRequest, "vmname is required")
 			return
 		}
-		vm.VMName = prefixedVMName(vm.OwnerUsername, name)
+		vm.VMName = prefixedVMName(targetOwner, name)
 		prefer["vmname"] = vm.VMName
+		changed = true
+	}
+	if req.OwnerUsername != nil {
+		oldOwner := vm.OwnerUsername
+		vm.OwnerUsername = targetOwner
+		if req.VMName == nil {
+			vm.VMName = prefixedVMName(targetOwner, stripVMNamePrefix(oldOwner, vm.VMName))
+			prefer["vmname"] = vm.VMName
+		}
+		if req.SecurityGroupName == nil {
+			if _, err := s.loadSecurityGroupRow(r.Context(), targetOwner, vm.SecurityGroupName); err != nil {
+				s.jsonError(w, http.StatusBadRequest, "current security group not found for new owner")
+				return
+			}
+		}
+		cfg["owner_username"] = vm.OwnerUsername
+		prefer["owner_username"] = vm.OwnerUsername
 		changed = true
 	}
 	if req.Password != nil {
@@ -556,7 +623,12 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			if len(*req.SSHKeyIDs) == 0 {
 				vm.SSHKeys = []string{}
 			} else {
-				keys, err := s.loadSSHKeysByIDs(r.Context(), current.Username, *req.SSHKeyIDs)
+				var keys []string
+				if current.IsAdmin {
+					keys, err = s.loadSSHKeysByIDsAny(r.Context(), *req.SSHKeyIDs)
+				} else {
+					keys, err = s.loadSSHKeysByIDs(r.Context(), current.Username, *req.SSHKeyIDs)
+				}
 				if err != nil {
 					s.jsonError(w, http.StatusBadRequest, err.Error())
 					return
@@ -658,6 +730,16 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			cfg["gateway"] = bridge.IPv4.Gateway
 			prefer["bridge_key"] = *req.BridgeKey
 			prefer["gateway"] = bridge.IPv4.Gateway
+			rebootNeeded = true
+		}
+		if req.BootOrder != nil {
+			bootOrder, err := normalizeBootOrder(*req.BootOrder)
+			if err != nil {
+				s.jsonError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			cfg["boot_order"] = bootOrder
+			prefer["boot_order"] = bootOrder
 			rebootNeeded = true
 		}
 		if req.TemplateVMID != nil {
@@ -1268,6 +1350,246 @@ func (s *Server) handleCancelVMTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "canceled": true})
 }
 
+func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.requireAdmin(r)
+	if err != nil {
+		s.jsonError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	_ = current
+	id, err := parseIDParam(r, "id")
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "vm is already managed")
+		return
+	}
+	if vm.SyncState == "deleting" || vm.DeleteRequestedAt != nil {
+		s.jsonError(w, http.StatusBadRequest, "vm is pending deletion")
+		return
+	}
+
+	var req adoptVMRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.OwnerUsername == "" || req.VMName == "" || req.IP == "" || req.CPUKey == "" || req.StorageKey == "" || req.BridgeKey == "" || req.SecurityGroupName == "" {
+		s.jsonError(w, http.StatusBadRequest, "missing required fields")
+		return
+	}
+	if !validUsernameLike(req.OwnerUsername) {
+		s.jsonError(w, http.StatusBadRequest, "invalid owner_username")
+		return
+	}
+	if _, err := s.loadUserRow(r.Context(), req.OwnerUsername); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "owner user not found")
+		return
+	}
+	if req.CPUCores <= 0 || req.MemoryGB <= 0 || req.DiskGB <= 0 {
+		s.jsonError(w, http.StatusBadRequest, "cpu_cores, memory_gb and disk_gb must be positive")
+		return
+	}
+	if req.DiskGB < 20 {
+		s.jsonError(w, http.StatusBadRequest, "disk_gb must be at least 20")
+		return
+	}
+	cluster, err := s.getClusterConfig(vm.ClusterKey)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cpuOpt, ok := cluster.CPUByKey(req.CPUKey)
+	if !ok {
+		s.jsonError(w, http.StatusBadRequest, "unknown cpu_key")
+		return
+	}
+	storageOpt, ok := cluster.StorageByKey(req.StorageKey)
+	if !ok {
+		s.jsonError(w, http.StatusBadRequest, "unknown storage_key")
+		return
+	}
+	bridgeOpt, ok := cluster.BridgeByKey(req.BridgeKey)
+	if !ok {
+		s.jsonError(w, http.StatusBadRequest, "unknown bridge_key")
+		return
+	}
+	if req.CPUCores > cpuOpt.Limit || req.MemoryGB > cpuOpt.MemoryLimit || req.DiskGB > storageOpt.Limit {
+		s.jsonError(w, http.StatusBadRequest, "requested resources exceed selected cluster option limit")
+		return
+	}
+	if _, _, err := net.ParseCIDR(req.IP); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid cidr")
+		return
+	}
+	if req.Power == "" {
+		req.Power = "running"
+	}
+	if req.Power != "running" && req.Power != "stopped" && req.Power != "reboot" {
+		s.jsonError(w, http.StatusBadRequest, "invalid power")
+		return
+	}
+	bootOrder, err := normalizeBootOrder(req.BootOrder)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	password := randomPassword(20)
+	if req.Password != nil {
+		if trimmed := strings.TrimSpace(*req.Password); trimmed != "" {
+			password = trimmed
+		}
+	}
+	var sshKeys []string
+	if len(req.SSHKeyIDs) > 0 {
+		sshKeys, err = s.loadSSHKeysByIDsAny(r.Context(), req.SSHKeyIDs)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else {
+		sshKeys, err = normalizeSSHKeyList(req.SSHKeys)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid ssh key: %v", err))
+			return
+		}
+	}
+	sharedUsernames := normalizeStringList(req.SharedUsernames)
+	for _, shared := range sharedUsernames {
+		if !validUsernameLike(shared) {
+			s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("invalid shared username %q", shared))
+			return
+		}
+	}
+	if containsString(sharedUsernames, req.OwnerUsername) {
+		s.jsonError(w, http.StatusBadRequest, "owner cannot be in shared_usernames")
+		return
+	}
+	sgOwner := req.SecurityGroupOwner
+	if sgOwner == "" {
+		sgOwner = req.OwnerUsername
+	}
+	if !validUsernameLike(sgOwner) {
+		s.jsonError(w, http.StatusBadRequest, "invalid security_group_owner")
+		return
+	}
+	if _, err := s.loadSecurityGroupRow(r.Context(), sgOwner, req.SecurityGroupName); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "security group not found or not owned by owner")
+		return
+	}
+	var uestcRestricted bool
+	if req.UESTCRestricted != nil {
+		uestcRestricted = *req.UESTCRestricted
+	}
+	if cluster.Network.UESTC != "" && req.UESTCRestricted == nil {
+		uestcRestricted = true
+	}
+
+	cfgJSON, _ := json.Marshal(map[string]any{
+		"owner_username":       req.OwnerUsername,
+		"vmname":               prefixedVMName(req.OwnerUsername, req.VMName),
+		"cpu_key":              req.CPUKey,
+		"cpu_cores":            req.CPUCores,
+		"memory_gb":            req.MemoryGB,
+		"storage_key":          req.StorageKey,
+		"disk_gb":              req.DiskGB,
+		"bridge_key":           req.BridgeKey,
+		"bridge_ipfilter":      bridgeOpt.IPFilter,
+		"gateway":              bridgeOpt.IPv4.Gateway,
+		"ip":                   req.IP,
+		"sshkeys":              sshKeys,
+		"shared_usernames":     sharedUsernames,
+		"security_group_owner": sgOwner,
+		"security_group_name":  req.SecurityGroupName,
+		"uestc_restricted":     uestcRestricted,
+		"boot_order":           bootOrder,
+		"power":                req.Power,
+		"root_user":            "root",
+	})
+	preferJSON, _ := json.Marshal(map[string]any{
+		"intent":               "present",
+		"power":                req.Power,
+		"generation":           1,
+		"vmname":               prefixedVMName(req.OwnerUsername, req.VMName),
+		"cpu_key":              req.CPUKey,
+		"cpu_cores":            req.CPUCores,
+		"memory_gb":            req.MemoryGB,
+		"storage_key":          req.StorageKey,
+		"disk_gb":              req.DiskGB,
+		"bridge_key":           req.BridgeKey,
+		"ip":                   req.IP,
+		"gateway":              bridgeOpt.IPv4.Gateway,
+		"sshkeys":              sshKeys,
+		"shared_usernames":     sharedUsernames,
+		"security_group_owner": sgOwner,
+		"security_group_name":  req.SecurityGroupName,
+		"uestc_restricted":     uestcRestricted,
+		"boot_order":           bootOrder,
+	})
+	realJSON := vm.RealStatus
+	if len(realJSON) == 0 {
+		realJSON = json.RawMessage(`{"intent":"unmanaged"}`)
+	}
+	currentPower := vmPowerFromRaw(realJSON)
+	if currentPower == "" {
+		currentPower = "unknown"
+	}
+	rebootNeeded := currentPower == "running" && req.Power == "running"
+	now := timestamp()
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET owner_username = ?, vmname = ?, ip = ?, password = ?, sshkeys_json = ?, shared_usernames_json = ?,
+		    security_group_name = ?, uestc_restricted = ?, config_json = ?, prefer_status_json = ?, real_status_json = ?,
+		    managed = 1, sync_state = 'pending', sync_error = NULL, delete_requested_at = NULL,
+		    delete_execute_after = NULL, updated_at = ?, version = version + 1
+		WHERE id = ?
+	`, req.OwnerUsername, prefixedVMName(req.OwnerUsername, req.VMName), req.IP, password, mustJSON(sshKeys), mustJSON(sharedUsernames),
+		req.SecurityGroupName, boolToInt(uestcRestricted), string(cfgJSON), string(preferJSON), string(realJSON), now, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := queueVMTaskTx(r.Context(), tx, vm.ID, "apply", map[string]any{"vm_id": vm.ID, "adopt": true}); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rebootNeeded && currentPower != "stopped" {
+		if err := queueVMTaskTx(r.Context(), tx, vm.ID, "reboot", map[string]any{"vm_id": vm.ID, "reason": "adopt"}); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	vm, err = s.loadVMRow(r.Context(), vm.ID)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if current.Username != vm.OwnerUsername {
+		vm.Password = ""
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
 func intFromOrZero(obj map[string]any, key string) int {
 	if obj == nil {
 		return 0
@@ -1298,4 +1620,29 @@ func vmPowerFromRaw(raw json.RawMessage) string {
 		return power
 	}
 	return "unknown"
+}
+
+func normalizeBootOrder(value string) (string, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "", "order=scsi0;ide0", "scsi0;ide0":
+		return "order=scsi0;ide0", nil
+	case "order=ide0;scsi0", "ide0;scsi0":
+		return "order=ide0;scsi0", nil
+	default:
+		return "", fmt.Errorf("boot_order must be order=scsi0;ide0 or order=ide0;scsi0")
+	}
+}
+
+func stripVMNamePrefix(owner, name string) string {
+	owner = strings.TrimSpace(owner)
+	name = strings.TrimSpace(name)
+	if owner == "" || name == "" {
+		return name
+	}
+	prefix := owner + "-"
+	if strings.HasPrefix(name, prefix) {
+		return strings.TrimPrefix(name, prefix)
+	}
+	return name
 }

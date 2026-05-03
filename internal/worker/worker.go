@@ -693,6 +693,11 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 	if stringFromMap(cfg, "ipconfig0", "") != fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway) {
 		params.Set("ipconfig0", fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway))
 	}
+	if desiredBoot, err := normalizeBootOrder(stringFrom(prefer, "boot_order", "")); err == nil && desiredBoot != "" {
+		if stringFromMap(cfg, "boot", "") != desiredBoot {
+			params.Set("boot", desiredBoot)
+		}
+	}
 	if truthy(cfg["agent"]) {
 		params.Set("agent", "0")
 	}
@@ -757,6 +762,18 @@ func normalizeSSHKeyLine(value string) (string, error) {
 		line += " " + comment
 	}
 	return line, nil
+}
+
+func normalizeBootOrder(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "", "order=scsi0;ide0", "scsi0;ide0":
+		return "order=scsi0;ide0"
+	case "order=ide0;scsi0", "ide0;scsi0":
+		return "order=ide0;scsi0"
+	default:
+		return ""
+	}
 }
 
 func truthy(v any) bool {

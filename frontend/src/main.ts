@@ -166,7 +166,7 @@ const state = {
   users: [] as UserRow[],
   activeTab: 'vms',
   adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance',
-  vmDialogMode: 'create' as 'create' | 'edit',
+  vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
   detailVmId: null as number | null,
   sgDialogMode: 'create' as 'create' | 'edit',
@@ -329,7 +329,8 @@ app.innerHTML = `
       <input type="hidden" id="vm-id" />
       <div class="form-grid">
         <label>Cluster<select id="vm-cluster" class="input"></select></label>
-        <label>Template<select id="vm-template" class="input"></select></label>
+        <label id="vm-owner-row" class="hidden">Owner<input id="vm-owner" class="input" placeholder="owner username" /></label>
+        <label id="vm-template-row">Template<select id="vm-template" class="input"></select></label>
         <label>名称<input id="vm-name" class="input" /></label>
         <label>CPU Key<select id="vm-cpu-key" class="input"></select></label>
         <label>CPU 核数<input id="vm-cpu-cores" class="input" type="number" min="1" /></label>
@@ -337,6 +338,10 @@ app.innerHTML = `
         <label>Storage Key<select id="vm-storage-key" class="input"></select></label>
         <label>Disk GB<input id="vm-disk-gb" class="input" type="number" min="20" /></label>
         <label>Bridge<select id="vm-bridge-key" class="input"></select></label>
+        <label>Boot Order<select id="vm-boot-order" class="input">
+          <option value="order=scsi0;ide0">disk first</option>
+          <option value="order=ide0;scsi0">cdrom first</option>
+        </select></label>
         <label>Security Group<select id="vm-sg" class="input"></select></label>
         <label>Password<input id="vm-password" class="input" type="password" autocomplete="new-password" placeholder="留空则随机生成或保持不变" /></label>
         <label>Power<select id="vm-power" class="input">
@@ -490,6 +495,9 @@ const els = {
   sshKey: $('#ssh-key') as HTMLTextAreaElement,
   vmId: $('#vm-id') as HTMLInputElement,
   vmCluster: $('#vm-cluster') as HTMLSelectElement,
+  vmOwner: $('#vm-owner') as HTMLInputElement,
+  vmOwnerRow: $('#vm-owner-row'),
+  vmTemplateRow: $('#vm-template-row'),
   vmTemplate: $('#vm-template') as HTMLSelectElement,
   vmName: $('#vm-name') as HTMLInputElement,
   vmCpuKey: $('#vm-cpu-key') as HTMLSelectElement,
@@ -498,6 +506,7 @@ const els = {
   vmStorageKey: $('#vm-storage-key') as HTMLSelectElement,
   vmDiskGB: $('#vm-disk-gb') as HTMLInputElement,
   vmBridgeKey: $('#vm-bridge-key') as HTMLSelectElement,
+  vmBootOrder: $('#vm-boot-order') as HTMLSelectElement,
   vmSg: $('#vm-sg') as HTMLSelectElement,
   vmPassword: $('#vm-password') as HTMLInputElement,
   vmPower: $('#vm-power') as HTMLSelectElement,
@@ -626,6 +635,11 @@ function realPowerFrom(vm: VM): string {
   return typeof power === 'string' ? power : 'unknown'
 }
 
+function normalizePowerChoice(value: string): 'running' | 'stopped' | 'reboot' {
+  if (value === 'stopped' || value === 'reboot') return value
+  return 'running'
+}
+
 function configString(config: Record<string, unknown>, key: string, fallback = ''): string {
   const value = config[key]
   return typeof value === 'string' && value ? value : fallback
@@ -696,11 +710,12 @@ function rowActions(vm: VM, allowAdminIp = false): string {
     `
   }
   return `
-    <div class="row-actions">
-      <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
-      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="running">开机</button>` : ''}
-      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="stopped">关机</button>` : ''}
-      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="reboot">重启</button>` : ''}
+      <div class="row-actions">
+        <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
+        ${!vm.managed ? `<button class="btn btn-mini" data-action="adopt" data-id="${vm.id}">接管</button>` : ''}
+        ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="running">开机</button>` : ''}
+        ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="stopped">关机</button>` : ''}
+        ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="reboot">重启</button>` : ''}
       ${vm.managed && !vm.task_queue_paused ? `<button class="btn btn-mini" data-action="pause-queue" data-id="${vm.id}">暂停任务</button>` : ''}
       ${vm.managed && vm.task_queue_paused ? `<button class="btn btn-mini" data-action="resume-queue" data-id="${vm.id}">恢复任务</button>` : ''}
       ${userOwns(vm) ? `<button class="btn btn-mini" data-action="edit" data-id="${vm.id}">编辑</button>` : ''}
@@ -902,7 +917,8 @@ function renderVmSSHKeyPicker() {
       selected.add(canonicalSSHKeyLine(key))
     }
   }
-  const keys = state.sshKeys
+  const adminScope = state.me?.is_admin && (state.vmDialogMode === 'adopt' || state.vmDialogMode === 'edit')
+  const keys = adminScope ? state.adminSSHKeys : state.sshKeys
   if (!keys.length) {
     els.vmSSHKeyList.innerHTML = `<div class="empty compact">没有可选 SSH Key。</div>`
     return
@@ -1136,6 +1152,11 @@ function renderVmFormOptions() {
   const previousStorage = els.vmStorageKey.value
   const previousBridge = els.vmBridgeKey.value
   const previousSg = els.vmSg.value
+  const isAdopt = state.vmDialogMode === 'adopt'
+  const adminEdit = Boolean(state.me?.is_admin && state.vmDialogMode === 'edit')
+  const adminScope = Boolean(state.me?.is_admin) && (isAdopt || adminEdit)
+  const groups = adminScope ? state.adminSecurityGroups : state.securityGroups
+
   els.vmCluster.innerHTML = opts.map((cluster) => `<option value="${escapeHtml(cluster.key)}">${escapeHtml(cluster.name)} (${escapeHtml(cluster.key)})</option>`).join('')
   if (previousCluster) {
     els.vmCluster.value = previousCluster
@@ -1146,7 +1167,7 @@ function renderVmFormOptions() {
   els.vmCpuKey.innerHTML = cluster.cpu.map((cpu) => `<option value="${escapeHtml(cpu.key)}">${escapeHtml(cpu.name)}</option>`).join('')
   els.vmStorageKey.innerHTML = cluster.storage.map((s) => `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)}</option>`).join('')
   els.vmBridgeKey.innerHTML = cluster.network.map((n) => `<option value="${escapeHtml(n.key)}">${escapeHtml(n.key)}</option>`).join('')
-  const templates = state.templates.filter((tpl) => tpl.cluster_key === cluster.key)
+  const templates = isAdopt ? [] : state.templates.filter((tpl) => tpl.cluster_key === cluster.key)
   const currentTemplateId = state.vmDialogVm ? configNumber(state.vmDialogVm.config, 'template_vmid', 0) : 0
   const templateOptions = templates.slice()
   if (currentTemplateId && !templateOptions.some((tpl) => tpl.template_vmid === currentTemplateId)) {
@@ -1167,9 +1188,13 @@ function renderVmFormOptions() {
     ? templateOptions.map((tpl) => `<option value="${tpl.template_vmid}">${escapeHtml(tpl.name)} (#${tpl.template_vmid})</option>`).join('')
     : `<option value="">暂无模板</option>`
 
-  const ownGroups = state.securityGroups.filter((group) => group.owner_username === state.me?.username)
-  els.vmSg.innerHTML = ownGroups.length
-    ? ownGroups.map((sg) => `<option value="${escapeHtml(sg.name)}">${escapeHtml(sg.name)}</option>`).join('')
+  els.vmSg.innerHTML = groups.length
+    ? groups
+        .map((sg) => {
+          const value = isAdopt ? `${sg.owner_username}::${sg.name}` : sg.name
+          return `<option value="${escapeHtml(value)}">${escapeHtml(sg.owner_username)} / ${escapeHtml(sg.name)}</option>`
+        })
+        .join('')
     : `<option value="">请先创建安全组</option>`
 
   if (previousCpu) els.vmCpuKey.value = previousCpu
@@ -1177,13 +1202,13 @@ function renderVmFormOptions() {
   if (previousBridge) els.vmBridgeKey.value = previousBridge
   if (previousSg) els.vmSg.value = previousSg
   if (previousTemplate) els.vmTemplate.value = previousTemplate
-  if (!els.vmTemplate.value && templateOptions[0]) {
+  if (!isAdopt && !els.vmTemplate.value && templateOptions[0]) {
     els.vmTemplate.value = String(templateOptions[0].template_vmid)
   }
-  if (!els.vmSg.value && ownGroups[0]) {
-    els.vmSg.value = ownGroups[0].name
+  if (!els.vmSg.value && groups[0]) {
+    els.vmSg.value = isAdopt ? `${groups[0].owner_username}::${groups[0].name}` : groups[0].name
   }
-  els.vmSubmit.disabled = state.vmDialogMode === 'create' && (!templateOptions.length || !ownGroups.length)
+  els.vmSubmit.disabled = state.vmDialogMode === 'create' && (!templateOptions.length || !groups.length)
 
   const network = cluster.network[0]
   if (network) {
@@ -1191,6 +1216,12 @@ function renderVmFormOptions() {
       els.vmUESTC.checked = network.uestc === 'force'
     }
     els.vmUESTC.disabled = network.uestc === 'force'
+  }
+  els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
+  els.vmTemplateRow.classList.toggle('hidden', isAdopt)
+  els.vmCluster.disabled = isAdopt
+  if (isAdopt) {
+    els.vmSubmit.disabled = !groups.length
   }
   renderVmSSHKeyPicker()
 }
@@ -1214,6 +1245,7 @@ function resetVmDialog() {
   els.vmMode.value = 'create'
   els.vmDialogTitle.textContent = '新建 VM'
   els.vmId.value = ''
+  els.vmOwner.value = ''
   els.vmName.value = ''
   els.vmCpuCores.value = '1'
   els.vmMemoryGB.value = '1'
@@ -1221,8 +1253,10 @@ function resetVmDialog() {
   els.vmPassword.value = ''
   els.vmPower.value = 'running'
   els.vmShared.value = ''
+  els.vmBootOrder.value = 'order=scsi0;ide0'
   els.vmUESTC.checked = false
   els.vmUESTC.disabled = false
+  els.vmCluster.disabled = false
   renderVmFormOptions()
 }
 
@@ -1235,7 +1269,9 @@ function fillVmDialog(vm: VM) {
   els.vmDialogTitle.textContent = `编辑 VM #${vm.vmid}`
   els.vmId.value = String(vm.id)
   els.vmCluster.value = vm.cluster_key
+  els.vmCluster.disabled = false
   renderVmFormOptions()
+  els.vmOwner.value = vm.owner_username
   els.vmTemplate.value = String(configNumber(vm.config, 'template_vmid', state.templates.find((tpl) => tpl.cluster_key === vm.cluster_key)?.template_vmid ?? 0) || '')
   els.vmName.value = vm.vmname
   els.vmCpuKey.value = configString(vm.config, 'cpu_key', cluster.cpu[0]?.key ?? '')
@@ -1246,19 +1282,52 @@ function fillVmDialog(vm: VM) {
   els.vmBridgeKey.value = configString(vm.config, 'bridge_key', cluster.network[0]?.key ?? '')
   els.vmSg.value = vm.security_group_name
   els.vmPassword.value = ''
-  els.vmPower.value = realPowerFrom(vm)
+  els.vmPower.value = normalizePowerChoice(realPowerFrom(vm))
+  els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
   renderVmSSHKeyPicker()
 }
 
-function openVmDialog(mode: 'create' | 'edit', vm?: VM) {
+function fillAdoptVmDialog(vm: VM) {
+  const cluster = getCluster(vm.cluster_key) ?? state.options?.clusters[0]
+  if (!cluster) return
+  state.vmDialogMode = 'adopt'
+  state.vmDialogVm = vm
+  els.vmMode.value = 'adopt'
+  els.vmDialogTitle.textContent = `接管 VM #${vm.vmid}`
+  els.vmId.value = String(vm.id)
+  els.vmCluster.value = vm.cluster_key
+  renderVmFormOptions()
+  els.vmOwner.value = ''
+  els.vmName.value = vm.vmname
+  els.vmCpuKey.value = configString(vm.config, 'cpu_key', cluster.cpu[0]?.key ?? '')
+  els.vmCpuCores.value = String(configNumber(vm.config, 'cpu_cores', 1))
+  els.vmMemoryGB.value = String(configNumber(vm.config, 'memory_gb', 1))
+  els.vmStorageKey.value = configString(vm.config, 'storage_key', cluster.storage[0]?.key ?? '')
+  els.vmDiskGB.value = String(configNumber(vm.config, 'disk_gb', 20))
+  els.vmBridgeKey.value = configString(vm.config, 'bridge_key', cluster.network[0]?.key ?? '')
+  els.vmPassword.value = ''
+  els.vmPower.value = normalizePowerChoice(realPowerFrom(vm))
+  els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
+  els.vmUESTC.checked = Boolean(vm.uestc_restricted)
+  els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
+  els.vmShared.value = vm.shared_usernames.join('\n')
+  els.vmCluster.disabled = true
+  renderVmSSHKeyPicker()
+}
+
+function openVmDialog(mode: 'create' | 'edit' | 'adopt', vm?: VM) {
   state.vmDialogMode = mode
   if (mode === 'create') {
     resetVmDialog()
   } else if (vm) {
-    fillVmDialog(vm)
+    if (mode === 'adopt') {
+      fillAdoptVmDialog(vm)
+    } else {
+      fillVmDialog(vm)
+    }
   }
   showDialog(els.vmDialog)
 }
@@ -1384,6 +1453,7 @@ function renderDetail(vm: VM) {
       <div><span class="label">VMID</span><div>${vm.vmid}</div></div>
       <div><span class="label">IP</span><div class="mono">${escapeHtml(vm.ip)}</div></div>
       <div><span class="label">Security Group</span><div>${escapeHtml(vm.security_group_name)}</div></div>
+      <div><span class="label">Boot Order</span><div>${escapeHtml(configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0')))}</div></div>
       <div><span class="label">Sync State</span><div>${statusBadge(vm.sync_state)}</div></div>
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
       <div><span class="label">任务队列</span><div>${vm.task_queue_paused ? '<span class="badge warn">已暂停</span>' : '<span class="badge ok">运行中</span>'}</div></div>
@@ -1582,9 +1652,15 @@ function startVmAutoRefresh() {
   }, 10000)
 }
 
-async function prepareVmDialogData() {
+async function prepareVmDialogData(mode: 'create' | 'edit' | 'adopt') {
   await loadOptions()
-  await Promise.all([loadSecurityGroups(), loadSSHKeys(), loadTemplates()])
+  if (mode === 'adopt' && state.me?.is_admin) {
+    await Promise.all([loadAdminSecurityGroups(), loadAdminSSHKeys()])
+  } else if (mode === 'edit' && state.me?.is_admin) {
+    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadAdminSSHKeys()])
+  } else {
+    await Promise.all([loadSecurityGroups(), loadSSHKeys(), loadTemplates()])
+  }
   renderVmFormOptions()
 }
 
@@ -1599,6 +1675,7 @@ function buildCreateVmPayload(): Record<string, unknown> {
     storage_key: els.vmStorageKey.value,
     disk_gb: Number(els.vmDiskGB.value),
     bridge_key: els.vmBridgeKey.value,
+    boot_order: els.vmBootOrder.value,
     template_vmid: Number(els.vmTemplate.value),
     ssh_key_ids: selectedSSHKeyIDs(),
     shared_usernames: parseLines(els.vmShared.value),
@@ -1609,11 +1686,11 @@ function buildCreateVmPayload(): Record<string, unknown> {
 }
 
 function buildEditVmPayload(vm: VM): Record<string, unknown> {
-  const ownerOnly = userOwns(vm)
+  const ownerOnly = userOwns(vm) || Boolean(state.me?.is_admin)
   if (!ownerOnly) {
     return { power: els.vmPower.value }
   }
-  return {
+  const payload: Record<string, unknown> = {
     vmname: els.vmName.value.trim(),
     password: els.vmPassword.value.trim() || undefined,
     cpu_key: els.vmCpuKey.value,
@@ -1622,10 +1699,42 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
     storage_key: els.vmStorageKey.value,
     disk_gb: Number(els.vmDiskGB.value),
     bridge_key: els.vmBridgeKey.value,
+    boot_order: els.vmBootOrder.value,
     template_vmid: Number(els.vmTemplate.value),
     ssh_key_ids: selectedSSHKeyIDs(),
     shared_usernames: parseLines(els.vmShared.value),
     security_group_name: els.vmSg.value,
+    uestc_restricted: els.vmUESTC.checked,
+    power: els.vmPower.value,
+  }
+  if (state.me?.is_admin) {
+    const owner = els.vmOwner.value.trim()
+    if (owner && owner !== vm.owner_username) {
+      payload.owner_username = owner
+    }
+  }
+  return payload
+}
+
+function buildAdoptVmPayload(): Record<string, unknown> {
+  const [securityGroupOwner, securityGroupName] = els.vmSg.value.includes('::')
+    ? els.vmSg.value.split('::', 2)
+    : ['', els.vmSg.value]
+  return {
+    owner_username: els.vmOwner.value.trim(),
+    vmname: els.vmName.value.trim(),
+    password: els.vmPassword.value.trim() || undefined,
+    cpu_key: els.vmCpuKey.value,
+    cpu_cores: Number(els.vmCpuCores.value),
+    memory_gb: Number(els.vmMemoryGB.value),
+    storage_key: els.vmStorageKey.value,
+    disk_gb: Number(els.vmDiskGB.value),
+    bridge_key: els.vmBridgeKey.value,
+    boot_order: els.vmBootOrder.value,
+    ssh_key_ids: selectedSSHKeyIDs(),
+    shared_usernames: parseLines(els.vmShared.value),
+    security_group_owner: securityGroupOwner,
+    security_group_name: securityGroupName,
     uestc_restricted: els.vmUESTC.checked,
     power: els.vmPower.value,
   }
@@ -1640,6 +1749,12 @@ async function submitVmForm(event: SubmitEvent) {
         body: JSON.stringify(buildCreateVmPayload()),
       })
       flash('VM 已创建，等待 worker 同步。', 'ok')
+    } else if (state.vmDialogMode === 'adopt' && state.vmDialogVm) {
+      await api(`/api/admin/vms/${state.vmDialogVm.id}/adopt`, {
+        method: 'POST',
+        body: JSON.stringify(buildAdoptVmPayload()),
+      })
+      flash('VM 已接管，等待 worker 同步。', 'ok')
     } else if (state.vmDialogVm) {
       await api(`/api/vms/${state.vmDialogVm.id}`, {
         method: 'PATCH',
@@ -1869,7 +1984,7 @@ function bindEvents() {
   els.createVmBtn.addEventListener('click', async () => {
     try {
       state.vmDialogVm = null
-      await prepareVmDialogData()
+      await prepareVmDialogData('create')
       openVmDialog('create')
     } catch (err) {
       flash((err as Error).message, 'error')
@@ -1916,8 +2031,17 @@ function bindEvents() {
         case 'edit':
           try {
             state.vmDialogVm = vm
-            await prepareVmDialogData()
+            await prepareVmDialogData('edit')
             openVmDialog('edit', vm)
+          } catch (err) {
+            flash((err as Error).message, 'error')
+          }
+          break
+        case 'adopt':
+          try {
+            state.vmDialogVm = vm
+            await prepareVmDialogData('adopt')
+            openVmDialog('adopt', vm)
           } catch (err) {
             flash((err as Error).message, 'error')
           }

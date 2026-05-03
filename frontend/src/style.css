@@ -329,6 +329,10 @@ select {
   font-size: 12px;
 }
 
+.hidden {
+  display: none !important;
+}
+
 .icon-btn {
   width: 32px;
   height: 32px;

@@ -862,6 +862,43 @@ func (s *Server) loadSSHKeysByIDs(ctx context.Context, ownerUsername string, ids
 	return normalizeSSHKeyList(keys)
 }
 
+func (s *Server) loadSSHKeysByIDsAny(ctx context.Context, ids []int64) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		item, err := s.loadSSHKeyRowAny(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, item.PublicKey)
+	}
+	return normalizeSSHKeyList(keys)
+}
+
+func (s *Server) loadSSHKeyRowAny(ctx context.Context, id int64) (*sshKeySummary, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, owner_username, name, public_key, created_at, updated_at
+		FROM ssh_keys
+		WHERE id = ?
+	`, id)
+
+	var item sshKeySummary
+	if err := row.Scan(&item.ID, &item.OwnerUsername, &item.Name, &item.PublicKey, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &item, nil
+}
+
 func (s *Server) visibleSecurityGroup(ctx context.Context, ownerUsername, name string, current *model.User) (*securityGroupSummary, error) {
 	item, err := s.loadSecurityGroupRow(ctx, ownerUsername, name)
 	if err != nil {

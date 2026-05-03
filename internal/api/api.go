@@ -92,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/api/admin/ssh-keys", s.handleAdminListSSHKeys)
 	r.Get("/api/admin/maintenance-tasks", s.handleAdminListMaintenanceTasks)
 	r.Patch("/api/admin/vms/{id}", s.handleAdminPatchVM)
+	r.Post("/api/admin/vms/{id}/adopt", s.handleAdminAdoptVM)
 
 	return r
 }
