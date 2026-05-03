@@ -2077,13 +2077,13 @@ function renderDetail(vm: VM) {
   const passwordBlock = vm.password
     ? `<div class="detail-block"><h4>Login Password</h4><div class="mono password-value">${escapeHtml(vm.password)}</div></div>`
     : ''
-  const cpuKey = configString(vm.config, 'cpu_key')
+  const cpuKey = configString(vm.config, 'cpu_key', configString(vm.config, 'pve_cpu'))
   const storageKey = configString(vm.config, 'storage_key')
   const bridgeKey = configString(vm.config, 'bridge_key')
   const bootOrder = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   const cpuCores = configNumber(vm.config, 'cpu_cores', 0)
   const memoryGB = configNumber(vm.config, 'memory_gb', 0)
-  const diskGB = configNumber(vm.config, 'disk_gb', 0)
+  const diskGB = configNumber(vm.config, 'disk_gb', configNumber(vm.config, 'disk_gb_current', 0))
   els.detailPageContent.innerHTML = `
     <div class="detail-grid">
       <div><span class="label">Name</span><div>${scrollText(displayVmName(vm), 'strong')}</div></div>
