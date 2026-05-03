@@ -276,7 +276,17 @@ func (s *Server) handleAdminPatchVM(w http.ResponseWriter, r *http.Request) {
 	prefer["gateway"] = bridge.IPv4.Gateway
 	prefer["generation"] = intFromOrZero(prefer, "generation") + 1
 	preferBytes, _ := json.Marshal(prefer)
-	if _, err := s.db.ExecContext(r.Context(), `
+	currentPower := vmPowerFromRaw(vm.RealStatus)
+	if currentPower == "" {
+		currentPower = "unknown"
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
 		SET ip = ?, config_json = ?, prefer_status_json = ?, sync_state = 'pending', sync_error = NULL, updated_at = ?, version = version + 1
 		WHERE id = ?
@@ -284,7 +294,21 @@ func (s *Server) handleAdminPatchVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if err := queueVMTaskTx(r.Context(), tx, vm.ID, "apply", map[string]any{"vm_id": vm.ID, "reason": "admin_ip"}); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if currentPower == "running" {
+		if err := queueVMTaskTx(r.Context(), tx, vm.ID, "reboot", map[string]any{"vm_id": vm.ID, "reason": "admin_ip"}); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queued": true})
 }
 
 func parseIDParam(r *http.Request, name string) (int64, error) {
