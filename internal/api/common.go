@@ -25,6 +25,12 @@ var (
 	usernameTokenRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`)
 )
 
+const (
+	nodePlacementMetricWindow = 5 * time.Hour
+	nodePlacementCPUWeight    = 0.35
+	nodePlacementMemWeight    = 0.65
+)
+
 type apiError struct {
 	Error string `json:"error"`
 }
@@ -64,6 +70,7 @@ type vmSummary struct {
 	VMName             string          `json:"vmname"`
 	IP                 string          `json:"ip"`
 	Node               string          `json:"node"`
+	TargetNode         string          `json:"target_node"`
 	Password           string          `json:"-"`
 	SSHKeys            []string        `json:"sshkeys"`
 	SharedUsernames    []string        `json:"shared_usernames"`
@@ -141,6 +148,13 @@ type templateSummary struct {
 	LastSeenAt   string          `json:"last_seen_at"`
 	CreatedAt    string          `json:"created_at"`
 	UpdatedAt    string          `json:"updated_at"`
+}
+
+type nodeMetricCandidate struct {
+	Node     string
+	CPURatio float64
+	MemRatio float64
+	Samples  int
 }
 
 type quota struct {
@@ -697,6 +711,120 @@ func (s *Server) deriveIPv4(cluster config.Cluster, bridgeKey string, vmid int) 
 	return fmt.Sprintf("%s/%d", ip.String(), bridge.IPv4.CIDR), nil
 }
 
+func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, cluster config.Cluster, cpuKey string, templateReal json.RawMessage) (string, error) {
+	cpu, ok := cluster.CPUByKey(cpuKey)
+	if !ok {
+		return "", fmt.Errorf("unknown cpu_key")
+	}
+	candidates := normalizeStringList(cpu.Node)
+	if len(candidates) == 0 {
+		return templateNodeFromRealStatus(templateReal), nil
+	}
+
+	templateNode := templateNodeFromRealStatus(templateReal)
+	best, found, err := s.lowestLoadNode(ctx, clusterKey, candidates, templateNode)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return best, nil
+	}
+	if containsString(candidates, templateNode) {
+		return templateNode, nil
+	}
+	return candidates[0], nil
+}
+
+func (s *Server) lowestLoadNode(ctx context.Context, clusterKey string, nodes []string, preferredTie string) (string, bool, error) {
+	var best nodeMetricCandidate
+	found := false
+	for _, node := range nodes {
+		metric, ok, err := s.averageNodeMetric(ctx, clusterKey, node, nodePlacementMetricWindow)
+		if err != nil {
+			return "", false, err
+		}
+		if !ok {
+			continue
+		}
+		if !found || betterNodeMetric(metric, best, preferredTie) {
+			best = metric
+			found = true
+		}
+	}
+	return best.Node, found, nil
+}
+
+func (s *Server) averageNodeMetric(ctx context.Context, clusterKey string, node string, window time.Duration) (nodeMetricCandidate, bool, error) {
+	if window <= 0 {
+		window = nodePlacementMetricWindow
+	}
+	since := time.Now().UTC().Add(-window).Format(time.RFC3339Nano)
+	var cpuAvg, memAvg sql.NullFloat64
+	var samples int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT AVG(cpu_ratio), AVG(mem_ratio), COUNT(1)
+		FROM node_metrics
+		WHERE cluster_key = ? AND node = ? AND recorded_at >= ?
+	`, clusterKey, node, since).Scan(&cpuAvg, &memAvg, &samples)
+	if err != nil {
+		return nodeMetricCandidate{}, false, err
+	}
+	if samples == 0 {
+		return nodeMetricCandidate{}, false, nil
+	}
+	metric := nodeMetricCandidate{Node: node, Samples: samples}
+	if cpuAvg.Valid {
+		metric.CPURatio = cpuAvg.Float64
+	}
+	if memAvg.Valid {
+		metric.MemRatio = memAvg.Float64
+	}
+	return metric, true, nil
+}
+
+func betterNodeMetric(current, best nodeMetricCandidate, preferredTie string) bool {
+	currentScore := nodeMetricScore(current)
+	bestScore := nodeMetricScore(best)
+	if currentScore < bestScore-1e-9 {
+		return true
+	}
+	if currentScore > bestScore+1e-9 {
+		return false
+	}
+	if current.MemRatio < best.MemRatio-1e-9 {
+		return true
+	}
+	if current.MemRatio > best.MemRatio+1e-9 {
+		return false
+	}
+	if current.CPURatio < best.CPURatio-1e-9 {
+		return true
+	}
+	if current.CPURatio > best.CPURatio+1e-9 {
+		return false
+	}
+	if current.Node == preferredTie && best.Node != preferredTie {
+		return true
+	}
+	if current.Node != preferredTie && best.Node == preferredTie {
+		return false
+	}
+	return current.Node < best.Node
+}
+
+func nodeMetricScore(metric nodeMetricCandidate) float64 {
+	return metric.CPURatio*nodePlacementCPUWeight + metric.MemRatio*nodePlacementMemWeight
+}
+
+func templateNodeFromRealStatus(raw json.RawMessage) string {
+	var real map[string]any
+	if err := json.Unmarshal(raw, &real); err != nil {
+		return ""
+	}
+	node, _ := real["node"].(string)
+	return strings.TrimSpace(node)
+}
+
 func (s *Server) loadVMRow(ctx context.Context, id int64) (*vmSummary, error) {
 	return loadVMRow(ctx, s.db, id)
 }
@@ -707,7 +835,7 @@ type vmRowQuerier interface {
 
 func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error) {
 	row := q.QueryRowContext(ctx, `
-		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, password, sshkeys_json, shared_usernames_json,
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, target_node, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, managed, task_queue_paused, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
 		FROM vms
@@ -717,7 +845,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 	var item vmSummary
 	var sshkeys, shared string
 	var configRaw, preferRaw, realRaw string
-	var node sql.NullString
+	var node, targetNode sql.NullString
 	var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
 	if err := row.Scan(
 		&item.ID,
@@ -727,6 +855,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 		&item.VMName,
 		&item.IP,
 		&node,
+		&targetNode,
 		&item.Password,
 		&sshkeys,
 		&shared,
@@ -750,6 +879,9 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 	}
 	if node.Valid {
 		item.Node = node.String
+	}
+	if targetNode.Valid {
+		item.TargetNode = targetNode.String
 	}
 	item.Config = rawJSONFromString(configRaw)
 	item.PreferStatus = rawJSONFromString(preferRaw)
@@ -939,7 +1071,7 @@ func (s *Server) listAllVMs(ctx context.Context) ([]vmSummary, error) {
 
 func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bool) ([]vmSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, password, sshkeys_json, shared_usernames_json,
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, target_node, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
 		FROM vms
@@ -956,7 +1088,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 		var item vmSummary
 		var sshkeys, shared string
 		var configRaw, preferRaw, realRaw string
-		var node sql.NullString
+		var node, targetNode sql.NullString
 		var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
 		if err := rows.Scan(
 			&item.ID,
@@ -966,6 +1098,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 			&item.VMName,
 			&item.IP,
 			&node,
+			&targetNode,
 			&item.Password,
 			&sshkeys,
 			&shared,
@@ -988,6 +1121,9 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 		}
 		if node.Valid {
 			item.Node = node.String
+		}
+		if targetNode.Valid {
+			item.TargetNode = targetNode.String
 		}
 		item.Config = rawJSONFromString(configRaw)
 		item.PreferStatus = rawJSONFromString(preferRaw)

@@ -36,6 +36,7 @@ type vmRow struct {
 	VMName              string
 	IP                  string
 	Node                string
+	TargetNode          string
 	Password            string
 	SSHKeysJSON         string
 	SharedUsernamesJSON string
@@ -94,22 +95,6 @@ type templateRecord struct {
 	Description  *string
 	OSType       *string
 	RealStatus   string
-}
-
-type nodeLoad struct {
-	cpuRatio float64
-	memRatio float64
-	samples  int
-}
-
-type nodeCandidate struct {
-	name        string
-	score       float64
-	cpuScore    float64
-	memScore    float64
-	avgScore    float64
-	avgCPUScore float64
-	avgMemScore float64
 }
 
 func New(logger *slog.Logger, db *sql.DB, cfg *config.App, pveClient *pve.Client) *Worker {
@@ -317,7 +302,7 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 	rows, err := w.db.QueryContext(ctx, `
 		SELECT
 			vt.id, vt.kind, vt.payload_json, vt.status, vt.seq, vt.started_at, vt.finished_at,
-			v.id, v.owner_username, v.cluster_key, v.vmid, v.vmname, v.ip, v.node, v.password, v.sshkeys_json, v.shared_usernames_json,
+			v.id, v.owner_username, v.cluster_key, v.vmid, v.vmname, v.ip, v.node, v.target_node, v.password, v.sshkeys_json, v.shared_usernames_json,
 			v.security_group_name, v.uestc_restricted, v.config_json, v.prefer_status_json, v.real_status_json,
 			v.sync_state, v.managed, v.task_queue_paused, v.version, v.delete_execute_after
 		FROM vm_tasks vt
@@ -362,6 +347,7 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 			&current.VM.VMName,
 			&current.VM.IP,
 			&current.VM.Node,
+			&current.VM.TargetNode,
 			&current.VM.Password,
 			&current.VM.SSHKeysJSON,
 			&current.VM.SharedUsernamesJSON,
@@ -671,9 +657,15 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 	if !found {
 		return "", fmt.Errorf("template %d not found in template-pool", templateVMID)
 	}
-	targetNode, err := w.chooseNode(ctx, vm.ClusterKey, cluster, stringFrom(prefer, "cpu_key", ""), template.Node, intFrom(prefer, "cpu_cores"), intFrom(prefer, "memory_gb"))
-	if err != nil {
-		return "", err
+	targetNode := strings.TrimSpace(vm.TargetNode)
+	if targetNode == "" {
+		targetNode = strings.TrimSpace(stringFrom(prefer, "target_node", ""))
+	}
+	if targetNode == "" {
+		targetNode = strings.TrimSpace(vm.Node)
+	}
+	if targetNode == "" {
+		targetNode = template.Node
 	}
 	storage := stringFrom(prefer, "storage_key", "")
 	if storage == "" {
@@ -1048,139 +1040,6 @@ func (w *Worker) syncNodeMetrics(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func (w *Worker) chooseNode(ctx context.Context, clusterKey string, cluster config.Cluster, cpuKey string, fallback string, requestedCores int, requestedMemoryGB int) (string, error) {
-	cpu, ok := cluster.CPUByKey(cpuKey)
-	if !ok || len(cpu.Node) == 0 {
-		return fallback, nil
-	}
-
-	candidates := uniqueStrings(cpu.Node)
-	if len(candidates) == 0 {
-		return fallback, nil
-	}
-
-	best := nodeCandidate{score: math.Inf(1), avgScore: math.Inf(1)}
-	for _, node := range candidates {
-		status, err := w.pve.GetNodeStatus(ctx, clusterKey, node)
-		if err != nil {
-			w.logger.WarnContext(ctx, "node status unavailable", "cluster", clusterKey, "node", node, "error", err)
-			continue
-		}
-		load := currentNodeLoad(status)
-		score, cpuScore, memScore := scoreNodeLoad(load, status, requestedCores, requestedMemoryGB)
-
-		avgScore := math.Inf(1)
-		avgCPUScore := math.Inf(1)
-		avgMemScore := math.Inf(1)
-		if avgLoad, err := w.averageNodeLoad(ctx, clusterKey, node); err == nil && avgLoad.samples > 0 {
-			avgScore, avgCPUScore, avgMemScore = scoreNodeLoad(avgLoad, status, requestedCores, requestedMemoryGB)
-		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			w.logger.WarnContext(ctx, "historical node load unavailable", "cluster", clusterKey, "node", node, "error", err)
-		}
-
-		current := nodeCandidate{
-			name:        node,
-			score:       score,
-			cpuScore:    cpuScore,
-			memScore:    memScore,
-			avgScore:    avgScore,
-			avgCPUScore: avgCPUScore,
-			avgMemScore: avgMemScore,
-		}
-		if betterNodeCandidate(current, best, fallback) {
-			best = current
-		}
-	}
-	if best.name != "" {
-		w.logger.InfoContext(ctx, "node selected", "cluster", clusterKey, "cpu_key", cpuKey, "node", best.name, "score", best.score, "cpu_score", best.cpuScore, "mem_score", best.memScore)
-		return best.name, nil
-	}
-	for _, node := range candidates {
-		if node == fallback {
-			return fallback, nil
-		}
-	}
-	return candidates[0], nil
-}
-
-func betterNodeCandidate(current, best nodeCandidate, fallback string) bool {
-	if current.score < best.score-1e-9 {
-		return true
-	}
-	if math.Abs(current.score-best.score) > 1e-9 {
-		return false
-	}
-	if current.cpuScore < best.cpuScore-1e-9 {
-		return true
-	}
-	if math.Abs(current.cpuScore-best.cpuScore) > 1e-9 {
-		return false
-	}
-	if current.memScore < best.memScore-1e-9 {
-		return true
-	}
-	if math.Abs(current.memScore-best.memScore) > 1e-9 {
-		return false
-	}
-	if current.avgScore < best.avgScore-1e-9 {
-		return true
-	}
-	if math.Abs(current.avgScore-best.avgScore) > 1e-9 {
-		return false
-	}
-	if current.avgCPUScore < best.avgCPUScore-1e-9 {
-		return true
-	}
-	if math.Abs(current.avgCPUScore-best.avgCPUScore) > 1e-9 {
-		return false
-	}
-	if current.avgMemScore < best.avgMemScore-1e-9 {
-		return true
-	}
-	if math.Abs(current.avgMemScore-best.avgMemScore) > 1e-9 {
-		return false
-	}
-	if current.name == fallback && best.name != fallback {
-		return true
-	}
-	if current.name != fallback && best.name == fallback {
-		return false
-	}
-	return current.name < best.name
-}
-
-func currentNodeLoad(status pve.NodeStatus) nodeLoad {
-	return nodeLoad{
-		cpuRatio: nodeCPUPercent(status) / 100.0,
-		memRatio: nodeMemRatio(status),
-		samples:  1,
-	}
-}
-
-func (w *Worker) averageNodeLoad(ctx context.Context, clusterKey, node string) (nodeLoad, error) {
-	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
-	var cpuAvg, memAvg sql.NullFloat64
-	var samples sql.NullInt64
-	if err := w.db.QueryRowContext(ctx, `
-		SELECT AVG(cpu_ratio), AVG(mem_ratio), COUNT(1)
-		FROM node_metrics
-		WHERE cluster_key = ? AND node = ? AND recorded_at >= ?
-	`, clusterKey, node, since).Scan(&cpuAvg, &memAvg, &samples); err != nil {
-		return nodeLoad{}, err
-	}
-	if !samples.Valid || samples.Int64 == 0 {
-		return nodeLoad{}, sql.ErrNoRows
-	}
-	load := nodeLoad{samples: int(samples.Int64)}
-	if cpuAvg.Valid {
-		load.cpuRatio = cpuAvg.Float64
-	}
-	if memAvg.Valid {
-		load.memRatio = memAvg.Float64
-	}
-	return load, nil
-}
-
 func clusterNodes(cluster config.Cluster) []string {
 	return uniqueStrings(flattenCPUNodeLists(cluster))
 }
@@ -1233,31 +1092,6 @@ func (w *Worker) recordNodeMetric(ctx context.Context, clusterKey, node string, 
 		VALUES(?,?,?,?,?,?)
 	`, clusterKey, node, cpuRatio, memRatio, now, now)
 	return err
-}
-
-func scoreNodeLoad(load nodeLoad, status pve.NodeStatus, requestedCores, requestedMemoryGB int) (score float64, cpuScore float64, memScore float64) {
-	if requestedCores <= 0 {
-		requestedCores = 1
-	}
-	if requestedMemoryGB <= 0 {
-		requestedMemoryGB = 1
-	}
-	cpuCap := float64(status.MaxCPU)
-	if cpuCap <= 0 {
-		cpuCap = 1
-	}
-	memCap := float64(status.MaxMem)
-	if memCap <= 0 {
-		memCap = 1
-	}
-	cpuScore = load.cpuRatio + float64(requestedCores)/cpuCap
-	memScore = load.memRatio + float64(requestedMemoryGB)*1024*1024*1024/memCap
-	if cpuScore > memScore {
-		score = cpuScore
-	} else {
-		score = memScore
-	}
-	return score, cpuScore, memScore
 }
 
 func (w *Worker) loadSecurityGroupConfig(ctx context.Context, owner, name string) (securityGroupConfig, error) {

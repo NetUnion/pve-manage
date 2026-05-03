@@ -135,6 +135,7 @@ type VM struct {
 	VMName             string          `json:"vmname"`
 	IP                 string          `json:"ip"`
 	Node               string          `json:"node"`
+	TargetNode         string          `json:"target_node"`
 	SSHKeys            []string        `json:"sshkeys"`
 	SharedUsernames    []string        `json:"shared_usernames"`
 	SecurityGroupName  string          `json:"security_group_name"`
@@ -206,6 +207,7 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 			VMName:             vm.VMName,
 			IP:                 vm.IP,
 			Node:               vm.Node,
+			TargetNode:         vm.TargetNode,
 			SSHKeys:            vm.SSHKeys,
 			SharedUsernames:    vm.SharedUsernames,
 			SecurityGroupName:  vm.SecurityGroupName,
@@ -420,6 +422,11 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	targetNode, err := s.choosePlacementNode(r.Context(), req.ClusterKey, cluster, req.CPUKey, template.RealStatus)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	configJSON, _ := json.Marshal(map[string]any{
 		"cluster_key":         req.ClusterKey,
@@ -432,6 +439,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		"bridge_ipfilter":     bridgeOpt.IPFilter,
 		"template_vmid":       req.TemplateVMID,
 		"template_name":       template.Name,
+		"target_node":         targetNode,
 		"gateway":             bridgeOpt.IPv4.Gateway,
 		"ip":                  ip,
 		"sshkeys":             req.SSHKeys,
@@ -449,6 +457,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		"generation":          1,
 		"vmname":              req.VMName,
 		"template_vmid":       req.TemplateVMID,
+		"target_node":         targetNode,
 		"cpu_key":             req.CPUKey,
 		"cpu_cores":           req.CPUCores,
 		"memory_gb":           req.MemoryGB,
@@ -467,6 +476,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		"intent":         "present",
 		"power":          "unknown",
 		"vmid":           vmid,
+		"target_node":    targetNode,
 		"ip":             ip,
 		"last_synced_at": nil,
 	})
@@ -484,12 +494,12 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 
 	res, err := conn.ExecContext(r.Context(), `
 		INSERT INTO vms(
-			owner_username, cluster_key, vmid, vmname, ip, node, password,
+			owner_username, cluster_key, vmid, vmname, ip, node, target_node, password,
 			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
 			config_json, prefer_status_json, real_status_json, sync_state, version,
 			created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, current.Username, req.ClusterKey, vmid, req.VMName, ip, "", password, sshkeysJSON, sharedJSON, req.SecurityGroupName, uestcRestricted, string(configJSON), string(preferJSON), string(realJSON), "pending", 1, now, now)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	`, current.Username, req.ClusterKey, vmid, req.VMName, ip, "", targetNode, password, sshkeysJSON, sharedJSON, req.SecurityGroupName, uestcRestricted, string(configJSON), string(preferJSON), string(realJSON), "pending", 1, now, now)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -524,6 +534,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 			VMName:             vm.VMName,
 			IP:                 vm.IP,
 			Node:               vm.Node,
+			TargetNode:         vm.TargetNode,
 			SSHKeys:            vm.SSHKeys,
 			SharedUsernames:    vm.SharedUsernames,
 			SecurityGroupName:  vm.SecurityGroupName,

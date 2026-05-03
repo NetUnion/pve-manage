@@ -243,6 +243,13 @@ CREATE INDEX IF NOT EXISTS idx_maintenance_tasks_kind_status_created
 ALTER TABLE vms ADD COLUMN task_queue_paused INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		Version: 10,
+		Name:    "vm_target_node",
+		SQL: `
+ALTER TABLE vms ADD COLUMN target_node TEXT;
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {
