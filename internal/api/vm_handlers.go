@@ -153,6 +153,8 @@ type VM struct {
 	DeletedAt          *string         `json:"deleted_at,omitempty"`
 	DeleteRequestedAt  *string         `json:"delete_requested_at,omitempty"`
 	DeleteExecuteAfter *string         `json:"delete_execute_after,omitempty"`
+	Metrics            *vmMetrics      `json:"metrics,omitempty"`
+	MetricsHistory     []vmMetricPoint `json:"metrics_history,omitempty"`
 }
 
 func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
@@ -225,6 +227,8 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 			DeletedAt:          vm.DeletedAt,
 			DeleteRequestedAt:  vm.DeleteRequestedAt,
 			DeleteExecuteAfter: vm.DeleteExecuteAfter,
+			Metrics:            vm.Metrics,
+			MetricsHistory:     vm.MetricsHistory,
 		},
 		Password: func() string {
 			if current.Username == vm.OwnerUsername {

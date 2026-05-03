@@ -88,6 +88,25 @@ type vmSummary struct {
 	DeletedAt          *string         `json:"deleted_at,omitempty"`
 	DeleteRequestedAt  *string         `json:"delete_requested_at,omitempty"`
 	DeleteExecuteAfter *string         `json:"delete_execute_after,omitempty"`
+	Metrics            *vmMetrics      `json:"metrics,omitempty"`
+	MetricsHistory     []vmMetricPoint `json:"metrics_history,omitempty"`
+}
+
+type vmMetrics struct {
+	WindowSeconds int     `json:"window_seconds"`
+	Samples       int     `json:"samples"`
+	CPU           float64 `json:"cpu"`
+	Memory        float64 `json:"memory"`
+	DiskIO        float64 `json:"disk_io"`
+	Network       float64 `json:"network"`
+}
+
+type vmMetricPoint struct {
+	Time    string  `json:"time"`
+	CPU     float64 `json:"cpu"`
+	Memory  float64 `json:"memory"`
+	DiskIO  float64 `json:"disk_io"`
+	Network float64 `json:"network"`
 }
 
 type vmTaskSummary struct {
@@ -864,14 +883,14 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 	row := q.QueryRowContext(ctx, `
 		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, target_node, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, managed, task_queue_paused, config_json, prefer_status_json, real_status_json,
-		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
+		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after, metrics_json
 		FROM vms
 		WHERE id = ?
 	`, id)
 
 	var item vmSummary
 	var sshkeys, shared string
-	var configRaw, preferRaw, realRaw string
+	var configRaw, preferRaw, realRaw, metricsRaw string
 	var node, targetNode sql.NullString
 	var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
 	if err := row.Scan(
@@ -901,6 +920,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 		&deletedAt,
 		&deleteRequestedAt,
 		&deleteExecuteAfter,
+		&metricsRaw,
 	); err != nil {
 		return nil, err
 	}
@@ -918,6 +938,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 	item.DeletedAt = parseNullableTime(deletedAt)
 	item.DeleteRequestedAt = parseNullableTime(deleteRequestedAt)
 	item.DeleteExecuteAfter = parseNullableTime(deleteExecuteAfter)
+	item.MetricsHistory = parseVMMetricPoints(metricsRaw)
 	return &item, nil
 }
 
@@ -1100,7 +1121,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, target_node, password, sshkeys_json, shared_usernames_json,
 		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
-		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
+		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after, metrics_json
 		FROM vms
 		WHERE deleted_at IS NULL
 		ORDER BY cluster_key, vmid
@@ -1114,7 +1135,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 	for rows.Next() {
 		var item vmSummary
 		var sshkeys, shared string
-		var configRaw, preferRaw, realRaw string
+		var configRaw, preferRaw, realRaw, metricsRaw string
 		var node, targetNode sql.NullString
 		var deletedAt, deleteRequestedAt, deleteExecuteAfter sql.NullString
 		if err := rows.Scan(
@@ -1143,6 +1164,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 			&deletedAt,
 			&deleteRequestedAt,
 			&deleteExecuteAfter,
+			&metricsRaw,
 		); err != nil {
 			return nil, err
 		}
@@ -1160,6 +1182,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 		item.DeletedAt = parseNullableTime(deletedAt)
 		item.DeleteRequestedAt = parseNullableTime(deleteRequestedAt)
 		item.DeleteExecuteAfter = parseNullableTime(deleteExecuteAfter)
+		item.MetricsHistory = parseVMMetricPoints(metricsRaw)
 		if includeAll || (item.Managed && current != nil && (current.Username == item.OwnerUsername || containsString(item.SharedUsernames, current.Username))) {
 			items = append(items, item)
 		}
@@ -1176,6 +1199,17 @@ func (vm *vmSummary) SharedUsernamesToJSON() string {
 
 func (s *Server) vmVisibleToCurrentUser(vm *vmSummary, current *model.User) bool {
 	return current.IsAdmin || current.Username == vm.OwnerUsername || containsString(vm.SharedUsernames, current.Username)
+}
+
+func parseVMMetricPoints(raw string) []vmMetricPoint {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var points []vmMetricPoint
+	if err := json.Unmarshal([]byte(raw), &points); err != nil {
+		return nil
+	}
+	return points
 }
 
 func containsString(values []string, target string) bool {

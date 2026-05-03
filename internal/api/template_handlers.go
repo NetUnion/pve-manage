@@ -62,7 +62,36 @@ func (s *Server) handleAdminListVMs(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	attachAdminVMMetrics(items)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func attachAdminVMMetrics(items []vmSummary) {
+	for i := range items {
+		items[i].Metrics = summarizeStoredVMMetrics(items[i].MetricsHistory)
+	}
+}
+
+func summarizeStoredVMMetrics(points []vmMetricPoint) *vmMetrics {
+	if len(points) == 0 {
+		return nil
+	}
+	var cpuSum, memSum, diskSum, networkSum float64
+	for _, point := range points {
+		cpuSum += point.CPU
+		memSum += point.Memory
+		diskSum += point.DiskIO
+		networkSum += point.Network
+	}
+	samples := len(points)
+	return &vmMetrics{
+		WindowSeconds: 30 * 24 * 60 * 60,
+		Samples:       samples,
+		CPU:           cpuSum / float64(samples),
+		Memory:        memSum / float64(samples),
+		DiskIO:        diskSum / float64(samples),
+		Network:       networkSum / float64(samples),
+	}
 }
 
 func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {

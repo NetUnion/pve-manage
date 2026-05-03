@@ -72,6 +72,17 @@ type NodeStatus struct {
 	MaxMem int64   `json:"maxmem"`
 }
 
+type VMRRDPoint struct {
+	Time      int64   `json:"time"`
+	CPU       float64 `json:"cpu"`
+	Mem       int64   `json:"mem"`
+	MaxMem    int64   `json:"maxmem"`
+	DiskRead  float64 `json:"diskread"`
+	DiskWrite float64 `json:"diskwrite"`
+	NetIn     float64 `json:"netin"`
+	NetOut    float64 `json:"netout"`
+}
+
 func NewClient(logger *slog.Logger, tokens config.TokenFile) *Client {
 	return &Client{
 		logger: logger,
@@ -311,6 +322,21 @@ func (c *Client) VMStatus(ctx context.Context, clusterKey, node string, vmid int
 		return nil, err
 	}
 	return status, nil
+}
+
+func (c *Client) VMRRDData(ctx context.Context, clusterKey, node string, vmid int, timeframe string, cf string) ([]VMRRDPoint, error) {
+	if timeframe == "" {
+		timeframe = "hour"
+	}
+	params := url.Values{"timeframe": {timeframe}}
+	if cf != "" {
+		params.Set("cf", cf)
+	}
+	var points []VMRRDPoint
+	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/rrddata", url.PathEscape(node), vmid), params, &points); err != nil {
+		return nil, err
+	}
+	return points, nil
 }
 
 func (c *Client) GetNodeStatus(ctx context.Context, clusterKey, node string) (NodeStatus, error) {

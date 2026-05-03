@@ -88,6 +88,27 @@ type VM = {
   delete_execute_after?: string | null
   password?: string
   tasks?: VMTask[]
+  metrics?: VMMetrics | null
+  metrics_history?: VMMetricPoint[]
+}
+
+type VMMetrics = {
+  window_seconds: number
+  samples: number
+  cpu: number
+  memory: number
+  disk_io: number
+  network: number
+}
+
+type AdminVmSortKey = 'cpu' | 'memory' | 'disk_io' | 'network'
+
+type VMMetricPoint = {
+  time: string
+  cpu: number
+  memory: number
+  disk_io: number
+  network: number
 }
 
 type VMTask = {
@@ -181,6 +202,8 @@ const state = {
   users: [] as UserRow[],
   activeTab: 'vms',
   adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance',
+  adminVmSort: { key: 'cpu' as AdminVmSortKey, dir: 'desc' as 'asc' | 'desc' },
+  detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
   vmWizardStage: 1,
@@ -263,6 +286,19 @@ app.innerHTML = `
             </div>
           </div>
           <div id="vm-table" class="table-wrap"></div>
+        </section>
+
+        <section id="tab-vm-detail" class="tab-panel">
+          <div class="panel-head">
+            <div>
+              <h2>VM Details</h2>
+              <p>查看 VM 基本信息和最近一个月 MAX 指标。</p>
+            </div>
+            <div class="panel-actions">
+              <button type="button" class="btn btn-ghost" data-detail-back>返回列表</button>
+            </div>
+          </div>
+          <div id="detail-page-content" class="detail-content"></div>
         </section>
 
         <section id="tab-security" class="tab-panel">
@@ -507,11 +543,13 @@ const els = {
     ssh: $('#tab-ssh'),
     templates: $('#tab-templates'),
     admin: $('#tab-admin'),
+    'vm-detail': $('#tab-vm-detail'),
   },
   vmDialog: $('#vm-dialog') as HTMLDialogElement,
   sshDialog: $('#ssh-dialog') as HTMLDialogElement,
   sgDialog: $('#sg-dialog') as HTMLDialogElement,
   detailDialog: $('#detail-dialog') as HTMLDialogElement,
+  detailPageContent: $('#detail-page-content'),
   ipDialog: $('#ip-dialog') as HTMLDialogElement,
   vmForm: $('#vm-form') as HTMLFormElement,
   sshForm: $('#ssh-form') as HTMLFormElement,
@@ -581,6 +619,28 @@ function formatTime(value?: string | null): string {
   if (!value) return '-'
   const d = new Date(value)
   return Number.isNaN(d.getTime()) ? value : d.toLocaleString()
+}
+
+function formatPercent(value?: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  return `${(value * 100).toFixed(1)}%`
+}
+
+function formatRate(value?: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '-'
+  const units = ['B/s', 'KiB/s', 'MiB/s', 'GiB/s']
+  let current = value
+  let unit = 0
+  while (current >= 1024 && unit < units.length - 1) {
+    current /= 1024
+    unit++
+  }
+  return `${current.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
+function latestMetric(points?: VMMetricPoint[]): VMMetricPoint | null {
+  if (!points?.length) return null
+  return points[points.length - 1]
 }
 
 function flash(message: string, kind: 'info' | 'ok' | 'error' = 'info') {
@@ -1220,11 +1280,12 @@ function renderAdminVMs() {
     els.adminVmTable.innerHTML = `<div class="empty">没有 VM。</div>`
     return
   }
+  const items = sortedAdminVMs()
   els.adminVmTable.innerHTML = `
     <table>
-      <thead><tr><th>Name</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>Managed</th><th>Sync</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>Managed</th><th>Sync</th><th></th></tr></thead>
       <tbody>
-        ${state.allVMs
+        ${items
           .map(
             (vm) => `
               <tr>
@@ -1234,6 +1295,10 @@ function renderAdminVMs() {
                 <td>${escapeHtml(vm.node ?? 'auto')}</td>
                 <td>${vm.vmid}</td>
                 <td class="mono">${escapeHtml(vm.ip)}</td>
+                <td>${formatPercent(vm.metrics?.cpu)}</td>
+                <td>${formatPercent(vm.metrics?.memory)}</td>
+                <td>${formatRate(vm.metrics?.disk_io)}</td>
+                <td>${formatRate(vm.metrics?.network)}</td>
                 <td>${vm.managed ? 'yes' : 'no'}</td>
                 <td>${statusBadge(vm.sync_state)}</td>
                 <td>
@@ -1246,6 +1311,31 @@ function renderAdminVMs() {
       </tbody>
     </table>
   `
+}
+
+function sortedAdminVMs(): VM[] {
+  const { key, dir } = state.adminVmSort
+  return [...state.allVMs].sort((a, b) => {
+    const av = adminVmMetricValue(a, key)
+    const bv = adminVmMetricValue(b, key)
+    if (av == null && bv == null) return a.vmid - b.vmid
+    if (av == null) return 1
+    if (bv == null) return -1
+    if (av === bv) return a.vmid - b.vmid
+    const result = av - bv
+    return dir === 'asc' ? result : -result
+  })
+}
+
+function adminVmMetricValue(vm: VM, key: AdminVmSortKey): number | null {
+  const value = vm.metrics?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function adminVmSortButton(key: AdminVmSortKey, label: string): string {
+  const active = state.adminVmSort.key === key
+  const marker = active ? (state.adminVmSort.dir === 'asc' ? ' ↑' : ' ↓') : ''
+  return `<button class="table-sort" data-admin-vm-sort="${key}" type="button">${escapeHtml(label + marker)}</button>`
 }
 
 function renderAdminSecurityGroups() {
@@ -1684,13 +1774,16 @@ function openSSHDialog(mode: 'create' | 'edit', key?: SSHKey) {
 }
 
 function renderDetail(vm: VM) {
+  state.detailVM = vm
+  const metrics = vm.metrics_history ?? []
+  const latest = latestMetric(metrics)
   const deleteInfo = isDeletePending(vm)
     ? `<div><span class="label">删除时间</span><div>${escapeHtml(formatTime(vm.delete_execute_after))}</div></div>`
     : ''
   const passwordBlock = vm.password
     ? `<div class="detail-block"><h4>Login Password</h4><div class="mono password-value">${escapeHtml(vm.password)}</div></div>`
     : ''
-  els.detailContent.innerHTML = `
+  els.detailPageContent.innerHTML = `
     <div class="detail-grid">
       <div><span class="label">Name</span><div>${escapeHtml(vm.vmname)}</div></div>
       <div><span class="label">Owner</span><div>${escapeHtml(vm.owner_username)}</div></div>
@@ -1706,6 +1799,21 @@ function renderDetail(vm: VM) {
       ${deleteInfo}
     </div>
     ${passwordBlock}
+    <div class="detail-block">
+      <h4>月度 MAX 指标</h4>
+      ${
+        latest
+          ? `<div class="metric-cards">
+              <div class="metric-card"><span class="label">CPU</span><strong>${formatPercent(latest.cpu)}</strong></div>
+              <div class="metric-card"><span class="label">Memory</span><strong>${formatPercent(latest.memory)}</strong></div>
+              <div class="metric-card"><span class="label">Disk IO</span><strong>${formatRate(latest.disk_io)}</strong></div>
+              <div class="metric-card"><span class="label">Network</span><strong>${formatRate(latest.network)}</strong></div>
+            </div>
+            <div class="metric-note">最新采样时间：${escapeHtml(formatTime(latest.time))}，共 ${metrics.length} 个采样点。</div>
+            ${renderMetricTable(metrics)}`
+          : `<div class="empty compact">暂无指标数据，等待下一次 inventory scan 采集。</div>`
+      }
+    </div>
     <div class="detail-block">
       <h4>状态概览</h4>
       <div class="detail-grid compact">
@@ -1749,6 +1857,32 @@ function renderDetail(vm: VM) {
             </div>`
           : `<div class="empty compact">没有任务记录。</div>`
       }
+    </div>
+  `
+}
+
+function renderMetricTable(points: VMMetricPoint[]): string {
+  const rows = points.slice(-80).reverse()
+  return `
+    <div class="table-wrap compact metric-table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>CPU</th><th>Memory</th><th>Disk IO</th><th>Network</th></tr></thead>
+        <tbody>
+          ${rows
+            .map(
+              (point) => `
+                <tr>
+                  <td>${escapeHtml(formatTime(point.time))}</td>
+                  <td>${formatPercent(point.cpu)}</td>
+                  <td>${formatPercent(point.memory)}</td>
+                  <td>${formatRate(point.disk_io)}</td>
+                  <td>${formatRate(point.network)}</td>
+                </tr>
+              `,
+            )
+            .join('')}
+        </tbody>
+      </table>
     </div>
   `
 }
@@ -1859,6 +1993,9 @@ async function loadActiveTab() {
     case 'templates':
       await loadTemplates()
       break
+    case 'vm-detail':
+      if (state.detailVmId) await openDetailById(state.detailVmId)
+      break
   case 'admin':
       if (state.adminTab === 'users') {
         await loadAdminUsers()
@@ -1877,13 +2014,13 @@ async function loadActiveTab() {
 
 function startVmAutoRefresh() {
   window.setInterval(async () => {
-    if (!state.me || state.activeTab !== 'vms' || document.visibilityState !== 'visible') {
+    if (!state.me || (state.activeTab !== 'vms' && state.activeTab !== 'vm-detail') || document.visibilityState !== 'visible') {
       return
     }
     try {
       await loadVMs()
       renderSummary()
-      if (state.detailVmId && els.detailDialog.open) {
+      if (state.activeTab === 'vm-detail' && state.detailVmId) {
         const detail = await api<VM>(`/api/vms/${state.detailVmId}`)
         renderDetail(detail)
       }
@@ -2160,11 +2297,17 @@ async function patchVmPower(id: number, power: string) {
 }
 
 async function openVmDetails(vm: VM) {
+  window.location.hash = `#/vms/${vm.id}`
+  await showVmDetailPage(vm.id)
+}
+
+async function showVmDetailPage(id: number) {
   try {
-    state.detailVmId = vm.id
-    const detail = await api<VM>(`/api/vms/${vm.id}`)
+    state.detailVmId = id
+    state.activeTab = 'vm-detail'
+    renderTabs()
+    const detail = await api<VM>(`/api/vms/${id}`)
     renderDetail(detail)
-    els.detailDialog.showModal()
   } catch (err) {
     flash((err as Error).message, 'error')
   }
@@ -2181,10 +2324,27 @@ async function retryVmTask(vmId: number, taskId: number) {
 }
 
 async function openDetailById(id: number) {
-  const vm = currentVmById(id)
-  if (!vm) return
-  const detail = await api<VM>(`/api/vms/${vm.id}`)
+  state.detailVmId = id
+  const detail = await api<VM>(`/api/vms/${id}`)
   renderDetail(detail)
+}
+
+async function handleHashRoute() {
+  const match = window.location.hash.match(/^#\/vms\/(\d+)$/)
+  if (!match) return false
+  await showVmDetailPage(Number(match[1]))
+  return true
+}
+
+function backToVMList() {
+  state.activeTab = 'vms'
+  state.detailVmId = null
+  state.detailVM = null
+  if (window.location.hash.startsWith('#/vms/')) {
+    history.pushState('', document.title, window.location.pathname + window.location.search)
+  }
+  renderTabs()
+  void loadActiveTab()
 }
 
 function bindEvents() {
@@ -2199,6 +2359,9 @@ function bindEvents() {
   els.tabs.forEach((tab) => {
     tab.addEventListener('click', async () => {
       state.activeTab = tab.dataset.tab || 'vms'
+      if (window.location.hash.startsWith('#/vms/')) {
+        history.pushState('', document.title, window.location.pathname + window.location.search)
+      }
       renderTabs()
       try {
         await loadActiveTab()
@@ -2284,9 +2447,28 @@ function bindEvents() {
   els.addRuleBtn.addEventListener('click', () => addRuleRow())
   document.body.addEventListener('click', async (event) => {
     const target = event.target as HTMLElement
+    if (target.closest('[data-detail-back]')) {
+      backToVMList()
+      return
+    }
+
     const closeId = target.getAttribute('data-close-dialog')
     if (closeId) {
       closeDialog(closeId)
+      return
+    }
+
+    const adminVmSort = target.closest<HTMLElement>('[data-admin-vm-sort]')
+    if (adminVmSort) {
+      const key = adminVmSort.dataset.adminVmSort as AdminVmSortKey
+      if (key === 'cpu' || key === 'memory' || key === 'disk_io' || key === 'network') {
+        if (state.adminVmSort.key === key) {
+          state.adminVmSort.dir = state.adminVmSort.dir === 'asc' ? 'desc' : 'asc'
+        } else {
+          state.adminVmSort = { key, dir: 'desc' }
+        }
+        renderAdminVMs()
+      }
       return
     }
 
@@ -2420,6 +2602,10 @@ function bindEvents() {
     state.sgRules.splice(index, 1)
     renderRuleRows()
   })
+
+  window.addEventListener('hashchange', () => {
+    void handleHashRoute()
+  })
 }
 
 async function init() {
@@ -2427,7 +2613,8 @@ async function init() {
   try {
     await loadMe()
     if (state.me) {
-      await loadActiveTab()
+      const routed = await handleHashRoute()
+      if (!routed) await loadActiveTab()
     } else {
       els.summary.innerHTML = ''
       renderVmTable()

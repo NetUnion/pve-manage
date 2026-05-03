@@ -52,6 +52,14 @@ type vmRow struct {
 	DeleteExecuteAfter  sql.NullString
 }
 
+type vmMetricPoint struct {
+	Time    string
+	CPU     float64
+	Memory  float64
+	DiskIO  float64
+	Network float64
+}
+
 type vmTaskRow struct {
 	TaskID      int64
 	VM          vmRow
@@ -487,6 +495,9 @@ func (w *Worker) scanPVE(ctx context.Context) error {
 	}
 	if err := w.syncUnmanagedVMs(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("existing vms: %w", err))
+	}
+	if err := w.syncVMMetrics(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("vm metrics: %w", err))
 	}
 	return errors.Join(errs...)
 }
@@ -1038,6 +1049,88 @@ func (w *Worker) syncNodeMetrics(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (w *Worker) syncVMMetrics(ctx context.Context) error {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT id, cluster_key, vmid, node
+		FROM vms
+		WHERE deleted_at IS NULL AND node IS NOT NULL AND node <> ''
+		ORDER BY cluster_key, vmid
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type metricVM struct {
+		id         int64
+		clusterKey string
+		vmid       int
+		node       string
+	}
+	vms := make([]metricVM, 0)
+	for rows.Next() {
+		var vm metricVM
+		if err := rows.Scan(&vm.id, &vm.clusterKey, &vm.vmid, &vm.node); err != nil {
+			return err
+		}
+		vms = append(vms, vm)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	now := timestamp()
+	var errs []error
+	for _, vm := range vms {
+		points, err := w.pve.VMRRDData(ctx, vm.clusterKey, vm.node, vm.vmid, "month", "MAX")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s node %s vmid %d: %w", vm.clusterKey, vm.node, vm.vmid, err))
+			continue
+		}
+		metrics := vmMetricsFromRRD(points)
+		if err := w.replaceVMMetrics(ctx, vm.id, metrics, now); err != nil {
+			errs = append(errs, fmt.Errorf("cluster %s node %s vmid %d: %w", vm.clusterKey, vm.node, vm.vmid, err))
+			continue
+		}
+		w.logger.InfoContext(ctx, "vm metrics scanned", "cluster", vm.clusterKey, "node", vm.node, "vmid", vm.vmid, "count", len(metrics))
+	}
+	return errors.Join(errs...)
+}
+
+func vmMetricsFromRRD(points []pve.VMRRDPoint) []vmMetricPoint {
+	metrics := make([]vmMetricPoint, 0, len(points))
+	for _, point := range points {
+		if point.Time <= 0 {
+			continue
+		}
+		memory := 0.0
+		if point.MaxMem > 0 {
+			memory = float64(point.Mem) / float64(point.MaxMem)
+		}
+		metrics = append(metrics, vmMetricPoint{
+			Time:    time.Unix(point.Time, 0).UTC().Format(time.RFC3339),
+			CPU:     point.CPU,
+			Memory:  memory,
+			DiskIO:  point.DiskRead + point.DiskWrite,
+			Network: point.NetIn + point.NetOut,
+		})
+	}
+	return metrics
+}
+
+func (w *Worker) replaceVMMetrics(ctx context.Context, vmID int64, metrics []vmMetricPoint, now string) error {
+	data, err := json.Marshal(metrics)
+	if err != nil {
+		return err
+	}
+	_, err = w.db.ExecContext(ctx, `
+		UPDATE vms
+		SET metrics_json = ?, updated_at = ?
+		WHERE id = ?
+	`, string(data), now, vmID)
+	return err
 }
 
 func clusterNodes(cluster config.Cluster) []string {

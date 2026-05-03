@@ -250,6 +250,13 @@ ALTER TABLE vms ADD COLUMN task_queue_paused INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE vms ADD COLUMN target_node TEXT;
 `,
 	},
+	{
+		Version: 11,
+		Name:    "vm_metrics_json",
+		SQL: `
+ALTER TABLE vms ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '[]';
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {
