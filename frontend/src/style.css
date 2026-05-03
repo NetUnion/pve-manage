@@ -369,7 +369,7 @@ select {
 }
 
 .vm-table .col-vm-cluster {
-  width: 180px;
+  width: 220px;
 }
 
 .vm-table .col-vm-node {
@@ -456,7 +456,7 @@ th .cell-scroll {
 }
 
 .admin-vm-table .col-admin-cluster {
-  width: 180px;
+  width: 220px;
 }
 
 .admin-vm-table .col-admin-node {
