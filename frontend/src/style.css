@@ -467,8 +467,93 @@ th {
   margin-bottom: 10px;
 }
 
-.metric-table-wrap table {
-  min-width: 720px;
+.metric-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.metric-chart-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(216, 224, 236, 0.95);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 18% 0%, color-mix(in srgb, var(--metric-color) 20%, transparent), transparent 34%),
+    linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  box-shadow: 0 16px 36px rgba(24, 39, 75, 0.08);
+  padding: 14px 14px 12px;
+}
+
+.metric-chart-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.38), transparent 42%);
+}
+
+.metric-chart-head {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.metric-chart-head h5 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+
+.metric-chart-head strong {
+  color: var(--metric-color);
+  font-size: 18px;
+  white-space: nowrap;
+}
+
+.metric-chart-range,
+.metric-chart-foot {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metric-chart {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 190px;
+  filter: drop-shadow(0 8px 14px color-mix(in srgb, var(--metric-color) 18%, transparent));
+}
+
+.metric-grid-line {
+  stroke: rgba(95, 107, 132, 0.16);
+  stroke-width: 1;
+}
+
+.metric-line {
+  fill: none;
+  stroke: var(--metric-color);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 3.2;
+}
+
+.metric-dot {
+  fill: #ffffff;
+  stroke: var(--metric-color);
+  stroke-width: 3;
+}
+
+.metric-chart-foot {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .strong {
@@ -919,6 +1004,11 @@ button:disabled {
 
   .form-grid,
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-cards,
+  .metric-chart-grid {
     grid-template-columns: 1fr;
   }
 

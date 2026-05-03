@@ -1872,7 +1872,7 @@ function renderDetail(vm: VM) {
               <div class="metric-card"><span class="label">Network</span><strong>${formatRate(latest.network)}</strong></div>
             </div>
             <div class="metric-note">最新采样时间：${escapeHtml(formatTime(latest.time))}，共 ${metrics.length} 个采样点。</div>
-            ${renderMetricTable(metrics)}`
+            ${renderMetricCharts(metrics)}`
           : `<div class="empty compact">暂无指标数据，等待下一次 inventory scan 采集。</div>`
       }
     </div>
@@ -1923,30 +1923,89 @@ function renderDetail(vm: VM) {
   `
 }
 
-function renderMetricTable(points: VMMetricPoint[]): string {
-  const rows = points.slice(-80).reverse()
+function renderMetricCharts(points: VMMetricPoint[]): string {
+  const series = points.slice(-180)
   return `
-    <div class="table-wrap compact metric-table-wrap">
-      <table>
-        <thead><tr><th>Time</th><th>CPU</th><th>Memory</th><th>Disk IO</th><th>Network</th></tr></thead>
-        <tbody>
-          ${rows
-            .map(
-              (point) => `
-                <tr>
-                  <td>${escapeHtml(formatTime(point.time))}</td>
-                  <td>${formatPercent(point.cpu)}</td>
-                  <td>${formatPercent(point.memory)}</td>
-                  <td>${formatRate(point.disk_io)}</td>
-                  <td>${formatRate(point.network)}</td>
-                </tr>
-              `,
-            )
-            .join('')}
-        </tbody>
-      </table>
+    <div class="metric-chart-grid">
+      ${renderMetricChart(series, 'cpu', 'CPU MAX', formatPercent, '#2563eb')}
+      ${renderMetricChart(series, 'memory', 'Memory MAX', formatPercent, '#7c3aed')}
+      ${renderMetricChart(series, 'disk_io', 'Disk IO MAX', formatRate, '#0f9d7a')}
+      ${renderMetricChart(series, 'network', 'Network MAX', formatRate, '#d97706')}
     </div>
   `
+}
+
+function renderMetricChart(
+  points: VMMetricPoint[],
+  key: keyof Pick<VMMetricPoint, 'cpu' | 'memory' | 'disk_io' | 'network'>,
+  title: string,
+  formatter: (value?: number) => string,
+  color: string,
+): string {
+  const values = points.map((point) => metricNumber(point[key]))
+  const latest = values[values.length - 1] ?? 0
+  const maxValue = Math.max(...values, key === 'cpu' || key === 'memory' ? 1 : 0)
+  const minValue = 0
+  const path = chartPath(values, minValue, maxValue)
+  const area = path ? `${path} L 620 176 L 24 176 Z` : ''
+  const lastPoint = values.length ? chartPoint(values.length - 1, values[values.length - 1] ?? 0, values.length, minValue, maxValue) : null
+  const firstTime = points[0]?.time ? formatTime(points[0].time) : '-'
+  const lastTime = points[points.length - 1]?.time ? formatTime(points[points.length - 1].time) : '-'
+  const gradientId = `metric-gradient-${key}`
+
+  return `
+    <section class="metric-chart-card" style="--metric-color: ${color}">
+      <div class="metric-chart-head">
+        <div>
+          <h5>${escapeHtml(title)}</h5>
+          <div class="metric-chart-range">${escapeHtml(firstTime)} - ${escapeHtml(lastTime)}</div>
+        </div>
+        <strong>${escapeHtml(formatter(latest))}</strong>
+      </div>
+      <svg class="metric-chart" viewBox="0 0 644 200" role="img" aria-label="${escapeHtml(title)} chart" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="${gradientId}" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="${color}" stop-opacity="0.28" />
+            <stop offset="75%" stop-color="${color}" stop-opacity="0.04" />
+          </linearGradient>
+        </defs>
+        <line class="metric-grid-line" x1="24" x2="620" y1="32" y2="32" />
+        <line class="metric-grid-line" x1="24" x2="620" y1="104" y2="104" />
+        <line class="metric-grid-line" x1="24" x2="620" y1="176" y2="176" />
+        ${area ? `<path class="metric-area" d="${area}" fill="url(#${gradientId})" />` : ''}
+        ${path ? `<path class="metric-line" d="${path}" />` : ''}
+        ${lastPoint ? `<circle class="metric-dot" cx="${lastPoint.x}" cy="${lastPoint.y}" r="4.5" />` : ''}
+      </svg>
+      <div class="metric-chart-foot">
+        <span>0</span>
+        <span>Peak ${escapeHtml(formatter(maxValue))}</span>
+      </div>
+    </section>
+  `
+}
+
+function chartPath(values: number[], minValue: number, maxValue: number): string {
+  if (!values.length) return ''
+  return values
+    .map((value, index) => {
+      const point = chartPoint(index, value, values.length, minValue, maxValue)
+      return `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`
+    })
+    .join(' ')
+}
+
+function chartPoint(index: number, value: number, count: number, minValue: number, maxValue: number): { x: string; y: string } {
+  const width = 596
+  const height = 144
+  const x = 24 + (count <= 1 ? width : (index / (count - 1)) * width)
+  const range = Math.max(maxValue - minValue, 1)
+  const normalized = Math.max(0, Math.min(1, (value - minValue) / range))
+  const y = 176 - normalized * height
+  return { x: x.toFixed(2), y: y.toFixed(2) }
+}
+
+function metricNumber(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0
 }
 
 function currentVmById(id: number): VM | undefined {
@@ -2380,7 +2439,7 @@ async function openDetailById(id: number) {
 
 function backToVMList() {
   state.detailVM = null
-  void navigateTo('/vms')
+  void navigateTo('/admin/vms')
 }
 
 function bindEvents() {
