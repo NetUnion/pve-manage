@@ -948,7 +948,7 @@ func (s *Server) handlePowerVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusUnauthorized, err.Error())
 		return
 	}
-	id, err := parseInt64Param(r, "id")
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
 		return
