@@ -870,6 +870,15 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.input:disabled,
+select:disabled,
+textarea:disabled {
+  background: #eef3f9;
+  color: #7a869a;
+  border-color: #d9e2ef;
+  box-shadow: none;
+}
+
 .limit-hint {
   margin: 4px 0 14px;
   padding: 12px 14px;

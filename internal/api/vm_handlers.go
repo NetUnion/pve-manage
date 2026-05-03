@@ -307,7 +307,6 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 			req.SSHKeys = normalized
 		}
 	}
-	req.VMName = prefixedVMName(current.Username, req.VMName)
 	req.SharedUsernames = normalizeStringList(req.SharedUsernames)
 	for _, shared := range req.SharedUsernames {
 		if !validUsernameLike(shared) {
@@ -606,8 +605,8 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.CPUKey != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.BootOrder != nil || req.TemplateVMID != nil {
-		s.jsonError(w, http.StatusBadRequest, "after creation only cpu_cores and memory_gb can be changed")
+	if req.CPUKey != nil || req.StorageKey != nil || req.BridgeKey != nil || req.TemplateVMID != nil {
+		s.jsonError(w, http.StatusBadRequest, "cpu_key, storage_key, bridge_key and template_vmid are immutable after creation")
 		return
 	}
 	if req.Power != nil {
@@ -678,15 +677,13 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusBadRequest, "vmname is required")
 			return
 		}
-		vm.VMName = prefixedVMName(targetOwner, name)
+		vm.VMName = name
 		prefer["vmname"] = vm.VMName
 		changed = true
 	}
 	if req.OwnerUsername != nil {
-		oldOwner := vm.OwnerUsername
 		vm.OwnerUsername = targetOwner
 		if req.VMName == nil {
-			vm.VMName = prefixedVMName(targetOwner, stripVMNamePrefix(oldOwner, vm.VMName))
 			prefer["vmname"] = vm.VMName
 		}
 		if req.SecurityGroupName == nil {
@@ -1659,7 +1656,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 
 	cfgJSON, _ := json.Marshal(map[string]any{
 		"owner_username":       req.OwnerUsername,
-		"vmname":               prefixedVMName(req.OwnerUsername, req.VMName),
+		"vmname":               req.VMName,
 		"cpu_key":              req.CPUKey,
 		"cpu_cores":            req.CPUCores,
 		"memory_gb":            req.MemoryGB,
@@ -1682,7 +1679,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		"intent":               "present",
 		"power":                req.Power,
 		"generation":           1,
-		"vmname":               prefixedVMName(req.OwnerUsername, req.VMName),
+		"vmname":               req.VMName,
 		"cpu_key":              req.CPUKey,
 		"cpu_cores":            req.CPUCores,
 		"memory_gb":            req.MemoryGB,
@@ -1721,7 +1718,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		    managed = 1, sync_state = 'pending', sync_error = NULL, delete_requested_at = NULL,
 		    delete_execute_after = NULL, updated_at = ?, version = version + 1
 		WHERE id = ?
-	`, req.OwnerUsername, prefixedVMName(req.OwnerUsername, req.VMName), req.IP, password, mustJSON(sshKeys), mustJSON(sharedUsernames),
+	`, req.OwnerUsername, req.VMName, req.IP, password, mustJSON(sshKeys), mustJSON(sharedUsernames),
 		req.SecurityGroupName, boolToInt(uestcRestricted), string(cfgJSON), string(preferJSON), string(realJSON), now, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return

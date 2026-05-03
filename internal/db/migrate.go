@@ -257,6 +257,16 @@ ALTER TABLE vms ADD COLUMN target_node TEXT;
 ALTER TABLE vms ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '[]';
 `,
 	},
+	{
+		Version: 12,
+		Name:    "normalize_managed_vm_names",
+		SQL: `
+UPDATE vms
+SET vmname = substr(vmname, length(owner_username) + 2)
+WHERE managed = 1
+  AND vmname LIKE owner_username || '-%';
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

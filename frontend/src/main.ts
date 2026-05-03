@@ -726,6 +726,16 @@ function displayClusterName(key?: string): string {
   return getCluster(key)?.name || key || '-'
 }
 
+function displayVmName(vm: VM): string {
+  const prefix = `${vm.owner_username}-`
+  return vm.vmname.startsWith(prefix) ? vm.vmname.slice(prefix.length) : vm.vmname
+}
+
+function stripVmNamePrefix(owner: string, name: string): string {
+  const prefix = `${owner.trim()}-`
+  return name.startsWith(prefix) ? name.slice(prefix.length) : name
+}
+
 function getSelectedCluster(): ClusterOption | undefined {
   return getCluster(els.vmCluster.value)
 }
@@ -1704,6 +1714,7 @@ function renderVmFormOptions() {
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
+  els.vmName.disabled = false
   const managedEdit = state.vmDialogMode === 'edit'
   els.vmTemplate.disabled = managedEdit || isAdopt
   els.vmCpuKey.disabled = managedEdit || isAdopt

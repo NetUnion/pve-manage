@@ -688,7 +688,8 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 	if err := w.pve.EnsurePool(ctx, vm.ClusterKey, poolID); err != nil {
 		return "", err
 	}
-	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, targetNode, vm.VMID, vm.VMName, storage, poolID); err != nil {
+	desiredName := prefixedVMName(vm.OwnerUsername, vm.VMName)
+	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, targetNode, vm.VMID, desiredName, storage, poolID); err != nil {
 		return "", err
 	}
 	if node, ok, err := w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID); err != nil {
@@ -723,7 +724,7 @@ func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]an
 
 func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map[string]any, bridgeKey string, bridge config.BridgeConfig, cfg map[string]any, node string) error {
 	params := url.Values{}
-	desiredName := vm.VMName
+	desiredName := prefixedVMName(vm.OwnerUsername, vm.VMName)
 	if stringFromMap(cfg, "name", "") != desiredName {
 		params.Set("name", desiredName)
 	}
@@ -823,6 +824,19 @@ func normalizeBootOrder(value string) string {
 	default:
 		return ""
 	}
+}
+
+func prefixedVMName(owner, name string) string {
+	owner = strings.TrimSpace(owner)
+	name = strings.TrimSpace(name)
+	if owner == "" || name == "" {
+		return name
+	}
+	prefix := owner + "-"
+	if strings.HasPrefix(name, prefix) {
+		return name
+	}
+	return prefix + name
 }
 
 func truthy(v any) bool {
