@@ -1266,6 +1266,18 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 	if name == "" {
 		name = fmt.Sprintf("pve-%d", resource.VMID)
 	}
+	cfg := map[string]any{
+		"source": "pve-scan",
+		"node":   resource.Node,
+		"name":   name,
+	}
+	if rawCfg, cfgErr := w.pve.GetVMConfig(ctx, clusterKey, resource.Node, resource.VMID); cfgErr == nil {
+		for k, v := range unmanagedConfigSnapshot(rawCfg) {
+			cfg[k] = v
+		}
+	} else {
+		w.logger.WarnContext(ctx, "skip unmanaged vm config scan", "cluster", clusterKey, "node", resource.Node, "vmid", resource.VMID, "error", cfgErr)
+	}
 	real, _ := json.Marshal(map[string]any{
 		"intent":          "unmanaged",
 		"power":           resource.Status,
@@ -1289,11 +1301,7 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 		return err
 	}
 
-	cfg, _ := json.Marshal(map[string]any{
-		"source": "pve-scan",
-		"node":   resource.Node,
-		"name":   name,
-	})
+	cfgJSON, _ := json.Marshal(cfg)
 	prefer, _ := json.Marshal(map[string]any{
 		"intent": "unmanaged",
 	})
@@ -1304,7 +1312,7 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 			config_json, prefer_status_json, real_status_json, sync_state, version,
 			created_at, updated_at, managed
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, "__pve_unmanaged__", clusterKey, resource.VMID, name, "", resource.Node, "", "[]", "[]", "", 0, string(cfg), string(prefer), string(real), "unmanaged", 1, now, now, 0)
+		`, "__pve_unmanaged__", clusterKey, resource.VMID, name, "", resource.Node, "", "[]", "[]", "", 0, string(cfgJSON), string(prefer), string(real), "unmanaged", 1, now, now, 0)
 	return err
 }
 
@@ -1519,6 +1527,44 @@ func primaryDiskConfig(cfg map[string]any) (string, string) {
 	return "", ""
 }
 
+func unmanagedConfigSnapshot(cfg map[string]any) map[string]any {
+	snapshot := map[string]any{}
+	if cfg == nil {
+		return snapshot
+	}
+	if cpu := stringFromMap(cfg, "cpu", ""); cpu != "" {
+		snapshot["pve_cpu"] = cpu
+	}
+	if cores := intFromMapAny(cfg, "cores"); cores > 0 {
+		snapshot["cpu_cores"] = cores
+	}
+	if memoryMiB := intFromMapAny(cfg, "memory"); memoryMiB > 0 {
+		snapshot["memory_gb"] = int(math.Ceil(float64(memoryMiB) / 1024))
+	}
+	if boot := stringFromMap(cfg, "boot", ""); boot != "" {
+		snapshot["boot_order"] = boot
+	}
+	if diskKey, diskRaw := primaryDiskConfig(cfg); diskKey != "" {
+		snapshot["primary_disk_key"] = diskKey
+		if storageKey := storageKeyFromDisk(diskRaw); storageKey != "" {
+			snapshot["storage_key"] = storageKey
+		}
+		if diskSizeMiB := diskMiB(diskRaw); diskSizeMiB > 0 {
+			snapshot["primary_disk_mib"] = diskSizeMiB
+			snapshot["disk_gb_current"] = int(math.Ceil(float64(diskSizeMiB) / 1024))
+		}
+	}
+	if net0 := stringFromMap(cfg, "net0", ""); net0 != "" {
+		if bridge := bridgeFromNet0(net0); bridge != "" {
+			snapshot["bridge_key"] = bridge
+		}
+	}
+	if ip := ipv4FromIPConfig(stringFromMap(cfg, "ipconfig0", "")); ip != "" {
+		snapshot["ip"] = ip
+	}
+	return snapshot
+}
+
 func diskMiB(raw any) int {
 	value, _ := raw.(string)
 	match := sizeRE.FindStringSubmatch(value)
@@ -1542,6 +1588,43 @@ func diskMiB(raw any) int {
 		return 0
 	}
 	return int(math.Round(n))
+}
+
+func storageKeyFromDisk(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.SplitN(raw, ":", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func bridgeFromNet0(raw string) string {
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "bridge=") {
+			return strings.TrimSpace(strings.TrimPrefix(part, "bridge="))
+		}
+	}
+	return ""
+}
+
+func ipv4FromIPConfig(raw string) string {
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.HasPrefix(part, "ip=") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(part, "ip="))
+		if value == "" || strings.EqualFold(value, "dhcp") || strings.EqualFold(value, "auto") {
+			return ""
+		}
+		return value
+	}
+	return ""
 }
 
 func exactIPv4CIDR(ipWithCIDR string) string {

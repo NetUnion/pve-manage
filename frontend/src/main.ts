@@ -399,6 +399,7 @@ app.innerHTML = `
           <label id="vm-owner-row" class="hidden">Owner<input id="vm-owner" class="input" placeholder="owner username" /></label>
           <label id="vm-template-row">Template<select id="vm-template" class="input"></select></label>
           <label>名称<input id="vm-name" class="input" /></label>
+          <label id="vm-ip-row" class="hidden">IP/CIDR<input id="vm-ip" class="input" placeholder="10.10.80.11/18" /></label>
           <label>CPU Key<select id="vm-cpu-key" class="input"></select></label>
           <label>CPU 核数<input id="vm-cpu-cores" class="input" type="number" min="1" /></label>
           <label>Memory GB<input id="vm-memory-gb" class="input" type="number" min="1" /></label>
@@ -564,7 +565,9 @@ const els = {
   vmCluster: $('#vm-cluster') as HTMLSelectElement,
   vmOwner: $('#vm-owner') as HTMLInputElement,
   vmOwnerRow: $('#vm-owner-row'),
+  vmIpRow: $('#vm-ip-row'),
   vmTemplateRow: $('#vm-template-row'),
+  vmIp: $('#vm-ip') as HTMLInputElement,
   vmTemplate: $('#vm-template') as HTMLSelectElement,
   vmName: $('#vm-name') as HTMLInputElement,
   vmCpuKey: $('#vm-cpu-key') as HTMLSelectElement,
@@ -1755,6 +1758,7 @@ function renderVmFormOptions() {
     els.vmUESTC.disabled = network.uestc === 'force'
   }
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
+  els.vmIpRow.classList.toggle('hidden', !isAdopt)
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
   els.vmName.disabled = false
@@ -1794,6 +1798,7 @@ function resetVmDialog() {
   els.vmDialogTitle.textContent = '新建 VM'
   els.vmId.value = ''
   els.vmOwner.value = ''
+  els.vmIp.value = ''
   els.vmName.value = ''
   els.vmCpuCores.value = '1'
   els.vmMemoryGB.value = '1'
@@ -1820,6 +1825,7 @@ function fillVmDialog(vm: VM) {
   els.vmCluster.disabled = false
   renderVmFormOptions()
   els.vmOwner.value = vm.owner_username
+  els.vmIp.value = vm.ip
   els.vmTemplate.value = String(configNumber(vm.config, 'template_vmid', state.templates.find((tpl) => tpl.cluster_key === vm.cluster_key)?.template_vmid ?? 0) || '')
   els.vmName.value = stripVmNamePrefix(vm.owner_username, displayVmName(vm))
   els.vmCpuKey.value = configString(vm.config, 'cpu_key', cluster.cpu[0]?.key ?? '')
@@ -1850,12 +1856,13 @@ function fillAdoptVmDialog(vm: VM) {
   els.vmCluster.value = vm.cluster_key
   renderVmFormOptions()
   els.vmOwner.value = ''
+  els.vmIp.value = configString(vm.config, 'ip', vm.ip || '')
   els.vmName.value = stripVmNamePrefix(vm.owner_username, displayVmName(vm))
   els.vmCpuKey.value = configString(vm.config, 'cpu_key', chooseCpuKeyForNode(cluster, vm.node))
   els.vmCpuCores.value = String(configNumber(vm.config, 'cpu_cores', 1))
   els.vmMemoryGB.value = String(configNumber(vm.config, 'memory_gb', 1))
   els.vmStorageKey.value = configString(vm.config, 'storage_key', cluster.storage[0]?.key ?? '')
-  els.vmDiskGB.value = String(configNumber(vm.config, 'disk_gb', 20))
+  els.vmDiskGB.value = String(Math.max(configNumber(vm.config, 'disk_gb_current', 20), 20))
   els.vmBridgeKey.value = configString(vm.config, 'bridge_key', cluster.network[0]?.key ?? '')
   els.vmPassword.value = ''
   els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
@@ -2513,6 +2520,7 @@ function buildAdoptVmPayload(): Record<string, unknown> {
   return {
     owner_username: els.vmOwner.value.trim(),
     vmname: els.vmName.value.trim(),
+    ip: els.vmIp.value.trim(),
     password: els.vmPassword.value.trim() || undefined,
     cpu_key: els.vmCpuKey.value,
     cpu_cores: Number(els.vmCpuCores.value),
