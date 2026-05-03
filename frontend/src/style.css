@@ -416,8 +416,7 @@ select {
 }
 
 .cell-scroll.is-overflowing .cell-scroll-text {
-  animation: cell-marquee 8s linear infinite;
-  animation-play-state: paused;
+  transform: translateX(0);
 }
 
 .cell-scroll.is-overflowing .cell-scroll-text::after {
@@ -426,7 +425,7 @@ select {
 }
 
 .cell-scroll.is-overflowing:hover .cell-scroll-text {
-  animation-play-state: running;
+  animation: cell-marquee 8s linear infinite;
 }
 
 td .cell-scroll,
