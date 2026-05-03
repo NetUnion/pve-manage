@@ -1107,7 +1107,7 @@ func vmMetricsFromRRD(points []pve.VMRRDPoint) []vmMetricPoint {
 		}
 		memory := 0.0
 		if point.MaxMem > 0 {
-			memory = float64(point.Mem) / float64(point.MaxMem)
+			memory = point.Mem / point.MaxMem
 		}
 		metrics = append(metrics, vmMetricPoint{
 			Time:    time.Unix(point.Time, 0).UTC().Format(time.RFC3339),

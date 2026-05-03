@@ -75,8 +75,8 @@ type NodeStatus struct {
 type VMRRDPoint struct {
 	Time      int64   `json:"time"`
 	CPU       float64 `json:"cpu"`
-	Mem       int64   `json:"mem"`
-	MaxMem    int64   `json:"maxmem"`
+	Mem       float64 `json:"mem"`
+	MaxMem    float64 `json:"maxmem"`
 	DiskRead  float64 `json:"diskread"`
 	DiskWrite float64 `json:"diskwrite"`
 	NetIn     float64 `json:"netin"`
