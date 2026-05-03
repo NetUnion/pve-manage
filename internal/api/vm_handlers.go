@@ -426,7 +426,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	targetNode, err := s.choosePlacementNode(r.Context(), req.ClusterKey, cluster, req.CPUKey, req.CPUCores, req.MemoryGB, template.RealStatus)
+	targetNode, err := s.choosePlacementNode(r.Context(), conn, req.ClusterKey, cluster, req.CPUKey, req.CPUCores, req.MemoryGB, template.RealStatus)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -662,6 +662,11 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(vm.Config, &oldCfg)
 	prefer := map[string]any{}
 	_ = json.Unmarshal(vm.PreferStatus, &prefer)
+	oldCPUKey := stringFromMap(oldCfg, "cpu_key")
+	oldStorageKey := stringFromMap(oldCfg, "storage_key")
+	oldBridgeKey := stringFromMap(oldCfg, "bridge_key")
+	oldTemplateVMID := intFromOrZero(oldCfg, "template_vmid")
+	oldDiskGB := intFromOrZero(oldCfg, "disk_gb")
 	changed := false
 	rebootNeeded := false
 	currentPower := vmPowerFromRaw(vm.RealStatus)
@@ -703,6 +708,22 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		vm.Password = password
 		rebootNeeded = true
 		changed = true
+	}
+	if req.CPUKey != nil && strings.TrimSpace(*req.CPUKey) != oldCPUKey {
+		s.jsonError(w, http.StatusBadRequest, "cpu_key is immutable after creation")
+		return
+	}
+	if req.StorageKey != nil && strings.TrimSpace(*req.StorageKey) != oldStorageKey {
+		s.jsonError(w, http.StatusBadRequest, "storage_key is immutable after creation")
+		return
+	}
+	if req.BridgeKey != nil && strings.TrimSpace(*req.BridgeKey) != oldBridgeKey {
+		s.jsonError(w, http.StatusBadRequest, "bridge_key is immutable after creation")
+		return
+	}
+	if req.TemplateVMID != nil && *req.TemplateVMID != oldTemplateVMID {
+		s.jsonError(w, http.StatusBadRequest, "template_vmid is immutable after creation")
+		return
 	}
 	if (req.SSHKeys != nil || req.SSHKeyIDs != nil) && !sharedOnly {
 		if req.SSHKeyIDs != nil {
@@ -848,6 +869,10 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			rebootNeeded = true
 		}
 		if req.DiskGB != nil {
+			if *req.DiskGB < oldDiskGB {
+				s.jsonError(w, http.StatusBadRequest, "disk_gb can only increase")
+				return
+			}
 			cfg["disk_gb"] = *req.DiskGB
 			prefer["disk_gb"] = *req.DiskGB
 			rebootNeeded = true
@@ -1739,6 +1764,21 @@ func intFromOrZero(obj map[string]any, key string) int {
 		return 0
 	}
 	return n
+}
+
+func stringFromMap(obj map[string]any, key string) string {
+	if obj == nil {
+		return ""
+	}
+	v, ok := obj[key]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
 }
 
 func vmPowerFromRaw(raw json.RawMessage) string {

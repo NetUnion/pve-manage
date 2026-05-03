@@ -1296,8 +1296,7 @@ function updateVmWizardVisibility() {
 }
 
 function wizardStepReady(stage: number): boolean {
-  const cluster = currentCluster()
-  if (!cluster) return false
+  if (!currentCluster()) return false
   switch (stage) {
     case 1:
       return Boolean(els.vmCluster.value)
@@ -1709,8 +1708,8 @@ function renderVmFormOptions() {
   els.vmCpuKey.disabled = managedEdit || isAdopt
   els.vmStorageKey.disabled = managedEdit || isAdopt
   els.vmBridgeKey.disabled = managedEdit || isAdopt
-  els.vmBootOrder.disabled = managedEdit || isAdopt
-  els.vmDiskGB.disabled = managedEdit || isAdopt
+  els.vmBootOrder.disabled = isAdopt
+  els.vmDiskGB.disabled = isAdopt
   if (isAdopt) {
     els.vmSubmit.disabled = !groups.length
   }
@@ -2405,14 +2404,10 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     vmname: els.vmName.value.trim(),
     password: els.vmPassword.value.trim() || undefined,
-    cpu_key: els.vmCpuKey.value,
     cpu_cores: Number(els.vmCpuCores.value),
     memory_gb: Number(els.vmMemoryGB.value),
-    storage_key: els.vmStorageKey.value,
     disk_gb: Number(els.vmDiskGB.value),
-    bridge_key: els.vmBridgeKey.value,
     boot_order: els.vmBootOrder.value,
-    template_vmid: Number(els.vmTemplate.value),
     ssh_key_ids: selectedSSHKeyIDs(),
     shared_usernames: parseLines(els.vmShared.value),
     security_group_name: els.vmSg.value,
@@ -2718,35 +2713,34 @@ function bindEvents() {
     renderVmFormOptions()
     focusVmField('cpu')
   })
+  ;[
+    els.vmName,
+    els.vmCpuCores,
+    els.vmMemoryGB,
+    els.vmDiskGB,
+    els.vmPassword,
+    els.vmShared,
+    els.vmOwner,
+  ].forEach((field) => {
+    field.addEventListener('input', () => {
+      if (state.vmDialogMode === 'create') {
+        updateVmWizardControls()
+      }
+    })
+  })
   els.vmWizardBack.addEventListener('click', () => advanceVmWizard(-1))
   els.vmWizardNext.addEventListener('click', () => advanceVmWizard(1))
   els.vmCpuKey.addEventListener('change', () => {
-    if (state.vmDialogMode === 'create' && state.vmWizardStage < 3) {
-      state.vmWizardStage = 3
-    }
     renderVmFormOptions()
-    focusVmField('storage')
   })
   els.vmStorageKey.addEventListener('change', () => {
-    if (state.vmDialogMode === 'create' && state.vmWizardStage < 3) {
-      state.vmWizardStage = 3
-    }
     renderVmFormOptions()
-    focusVmField('bridge')
   })
   els.vmBridgeKey.addEventListener('change', () => {
-    if (state.vmDialogMode === 'create' && state.vmWizardStage < 4) {
-      state.vmWizardStage = 4
-    }
     renderVmFormOptions()
-    focusVmField('template')
   })
   els.vmTemplate.addEventListener('change', () => {
-    if (state.vmDialogMode === 'create' && state.vmWizardStage < 4) {
-      state.vmWizardStage = 4
-    }
     renderVmFormOptions()
-    focusVmField('name')
   })
   els.vmForm.addEventListener('submit', submitVmForm)
   els.sshForm.addEventListener('submit', submitSSHForm)

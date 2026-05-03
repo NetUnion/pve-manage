@@ -734,7 +734,11 @@ func (s *Server) deriveIPv4(cluster config.Cluster, bridgeKey string, vmid int) 
 	return fmt.Sprintf("%s/%d", ip.String(), bridge.IPv4.CIDR), nil
 }
 
-func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, cluster config.Cluster, cpuKey string, requestedCores int, requestedMemoryGB int, templateReal json.RawMessage) (string, error) {
+type vmAllocationQuerier interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func (s *Server) choosePlacementNode(ctx context.Context, q vmAllocationQuerier, clusterKey string, cluster config.Cluster, cpuKey string, requestedCores int, requestedMemoryGB int, templateReal json.RawMessage) (string, error) {
 	cpu, ok := cluster.CPUByKey(cpuKey)
 	if !ok {
 		return "", fmt.Errorf("unknown cpu_key")
@@ -745,7 +749,7 @@ func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, clu
 	}
 
 	templateNode := templateNodeFromRealStatus(templateReal)
-	best, found, err := s.lowestStaticAllocationNode(ctx, clusterKey, candidates, cpu, requestedCores, requestedMemoryGB, templateNode)
+	best, found, err := s.lowestStaticAllocationNode(ctx, q, clusterKey, candidates, cpu, requestedCores, requestedMemoryGB, templateNode)
 	if err != nil {
 		return "", err
 	}
@@ -758,11 +762,11 @@ func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, clu
 	return candidates[0], nil
 }
 
-func (s *Server) lowestStaticAllocationNode(ctx context.Context, clusterKey string, nodes []string, cpu config.CPUClass, requestedCores int, requestedMemoryGB int, preferredTie string) (string, bool, error) {
+func (s *Server) lowestStaticAllocationNode(ctx context.Context, q vmAllocationQuerier, clusterKey string, nodes []string, cpu config.CPUClass, requestedCores int, requestedMemoryGB int, preferredTie string) (string, bool, error) {
 	var best nodePlacementCandidate
 	found := false
 	for _, node := range nodes {
-		allocatedCPU, allocatedMem, err := s.nodeStaticAllocation(ctx, clusterKey, node)
+		allocatedCPU, allocatedMem, err := s.nodeStaticAllocation(ctx, q, clusterKey, node)
 		if err != nil {
 			return "", false, err
 		}
@@ -783,8 +787,8 @@ func (s *Server) lowestStaticAllocationNode(ctx context.Context, clusterKey stri
 	return best.Node, found, nil
 }
 
-func (s *Server) nodeStaticAllocation(ctx context.Context, clusterKey string, node string) (cpu int, memory int, err error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *Server) nodeStaticAllocation(ctx context.Context, q vmAllocationQuerier, clusterKey string, node string) (cpu int, memory int, err error) {
+	rows, err := q.QueryContext(ctx, `
 		SELECT config_json
 		FROM vms
 		WHERE cluster_key = ?
