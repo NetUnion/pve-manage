@@ -2946,6 +2946,7 @@ async function init() {
   try {
     await loadMe()
     if (state.me) {
+      await loadOptions()
       const validRoute = applyRoute(window.location.pathname)
       if (window.location.pathname === '/' || !validRoute) {
         history.replaceState({}, '', routeForTab(state.activeTab))
