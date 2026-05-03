@@ -1938,12 +1938,12 @@ function renderMetricCharts(points: VMMetricPoint[]): string {
 }
 
 function renderDiskIOChart(points: VMMetricPoint[]): string {
-  const chartLeft = 76
+  const chartLeft = 96
   const chartRight = 620
   const chartTop = 32
   const chartMid = 104
   const chartBottom = 176
-  const labelX = 48
+  const labelX = 80
   const readValues = points.map((point) => metricNumber(point.disk_read ?? point.disk_io))
   const writeValues = points.map((point) => metricNumber(point.disk_write ?? 0))
   const latestRead = readValues[readValues.length - 1] ?? 0
@@ -1958,7 +1958,6 @@ function renderDiskIOChart(points: VMMetricPoint[]): string {
   const firstTime = points[0]?.time ? formatTime(points[0].time) : '-'
   const lastTime = points[points.length - 1]?.time ? formatTime(points[points.length - 1].time) : '-'
   const midValue = maxValue / 2
-  const yLabelAttrs = 'textLength="66" lengthAdjust="spacingAndGlyphs"'
 
   return `
     <section class="metric-chart-card disk-chart" style="--metric-color: #0f9d7a; --metric-color-2: #2563eb">
@@ -1985,9 +1984,9 @@ function renderDiskIOChart(points: VMMetricPoint[]): string {
             <stop offset="75%" stop-color="#2563eb" stop-opacity="0.02" />
           </linearGradient>
         </defs>
-        <text class="metric-y-label" x="${labelX}" y="35" ${yLabelAttrs}>${escapeHtml(formatRate(maxValue))}</text>
-        <text class="metric-y-label" x="${labelX}" y="107" ${yLabelAttrs}>${escapeHtml(formatRate(midValue))}</text>
-        <text class="metric-y-label" x="${labelX}" y="179" ${yLabelAttrs}>0</text>
+        <text class="metric-y-label" x="${labelX}" y="35">${escapeHtml(formatRate(maxValue))}</text>
+        <text class="metric-y-label" x="${labelX}" y="107">${escapeHtml(formatRate(midValue))}</text>
+        <text class="metric-y-label" x="${labelX}" y="179">0</text>
         <line class="metric-grid-line" x1="${chartLeft}" x2="${chartRight}" y1="${chartTop}" y2="${chartTop}" />
         <line class="metric-grid-line" x1="${chartLeft}" x2="${chartRight}" y1="${chartMid}" y2="${chartMid}" />
         <line class="metric-grid-line" x1="${chartLeft}" x2="${chartRight}" y1="${chartBottom}" y2="${chartBottom}" />
@@ -2014,12 +2013,12 @@ function renderMetricChart(
   formatter: (value?: number) => string,
   color: string,
 ): string {
-  const chartLeft = 76
+  const chartLeft = 96
   const chartRight = 620
   const chartTop = 32
   const chartMid = 104
   const chartBottom = 176
-  const labelX = 48
+  const labelX = 80
   const values = points.map((point) => metricNumber(point[key]))
   const latest = values[values.length - 1] ?? 0
   const maxValue = Math.max(...values, key === 'cpu' || key === 'memory' ? 1 : 0)
@@ -2031,7 +2030,6 @@ function renderMetricChart(
   const lastTime = points[points.length - 1]?.time ? formatTime(points[points.length - 1].time) : '-'
   const gradientId = `metric-gradient-${key}`
   const midValue = (maxValue + minValue) / 2
-  const yLabelAttrs = 'textLength="66" lengthAdjust="spacingAndGlyphs"'
 
   return `
     <section class="metric-chart-card" style="--metric-color: ${color}">
@@ -2049,9 +2047,9 @@ function renderMetricChart(
             <stop offset="75%" stop-color="${color}" stop-opacity="0.04" />
           </linearGradient>
         </defs>
-        <text class="metric-y-label" x="${labelX}" y="35" ${yLabelAttrs}>${escapeHtml(formatter(maxValue))}</text>
-        <text class="metric-y-label" x="${labelX}" y="107" ${yLabelAttrs}>${escapeHtml(formatter(midValue))}</text>
-        <text class="metric-y-label" x="${labelX}" y="179" ${yLabelAttrs}>0</text>
+        <text class="metric-y-label" x="${labelX}" y="35">${escapeHtml(formatter(maxValue))}</text>
+        <text class="metric-y-label" x="${labelX}" y="107">${escapeHtml(formatter(midValue))}</text>
+        <text class="metric-y-label" x="${labelX}" y="179">0</text>
         <line class="metric-grid-line" x1="${chartLeft}" x2="${chartRight}" y1="${chartTop}" y2="${chartTop}" />
         <line class="metric-grid-line" x1="${chartLeft}" x2="${chartRight}" y1="${chartMid}" y2="${chartMid}" />
         <line class="metric-grid-line" x1="${chartLeft}" x2="${chartRight}" y1="${chartBottom}" y2="${chartBottom}" />
@@ -2078,9 +2076,9 @@ function chartPath(values: number[], minValue: number, maxValue: number): string
 }
 
 function chartPoint(index: number, value: number, count: number, minValue: number, maxValue: number): { x: string; y: string } {
-  const width = 544
+  const width = 524
   const height = 144
-  const x = 76 + (count <= 1 ? width : (index / (count - 1)) * width)
+  const x = 96 + (count <= 1 ? width : (index / (count - 1)) * width)
   const range = Math.max(maxValue - minValue, 1)
   const normalized = Math.max(0, Math.min(1, (value - minValue) / range))
   const y = 176 - normalized * height
