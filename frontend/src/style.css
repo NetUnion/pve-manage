@@ -351,56 +351,53 @@ select {
   box-shadow: var(--shadow);
 }
 
-.vm-list {
-  min-width: 1120px;
+.vm-table {
+  table-layout: fixed;
+  min-width: 1680px;
 }
 
-.vm-list-head,
-.vm-card-main {
-  display: grid;
-  grid-template-columns: minmax(180px, 1.3fr) 100px 120px 80px minmax(180px, 1.1fr) 120px 96px 96px 140px;
-  gap: 10px;
-  align-items: center;
+.vm-table .col-vm-name {
+  width: 220px;
 }
 
-.vm-list-head {
-  padding: 14px 16px;
-  border-bottom: 1px solid rgba(216, 224, 236, 0.9);
-  color: #475569;
-  font-weight: 600;
-  position: sticky;
-  top: 0;
-  background: #f8fafc;
-  z-index: 1;
+.vm-table .col-vm-actions {
+  width: 320px;
 }
 
-.vm-card {
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid rgba(216, 224, 236, 0.9);
+.vm-table .col-vm-owner {
+  width: 150px;
 }
 
-.vm-card:last-child {
-  border-bottom: 0;
+.vm-table .col-vm-cluster {
+  width: 180px;
 }
 
-.vm-card-main {
-  font-size: 14px;
-  white-space: nowrap;
+.vm-table .col-vm-node {
+  width: 100px;
 }
 
-.vm-card-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.vm-table .col-vm-vmid {
+  width: 84px;
 }
 
-.vm-card-actions {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(216, 224, 236, 0.8);
+.vm-table .col-vm-ip {
+  width: 170px;
 }
 
-.vm-card-actions .row-actions {
-  gap: 8px;
+.vm-table .col-vm-sg {
+  width: 120px;
+}
+
+.vm-table .col-vm-sync {
+  width: 110px;
+}
+
+.vm-table .col-vm-power {
+  width: 110px;
+}
+
+.vm-table .col-vm-updated {
+  width: 160px;
 }
 
 .cell-scroll {
@@ -417,6 +414,7 @@ select {
   gap: 24px;
   will-change: transform;
   animation: cell-marquee 8s linear infinite;
+  animation-play-state: paused;
 }
 
 .cell-scroll-track > span {
@@ -424,7 +422,7 @@ select {
 }
 
 .cell-scroll:hover .cell-scroll-track {
-  animation-play-state: paused;
+  animation-play-state: running;
 }
 
 td .cell-scroll,
@@ -520,6 +518,11 @@ th {
 
 .admin-vm-table th,
 .admin-vm-table td {
+  overflow: hidden;
+}
+
+.vm-table th,
+.vm-table td {
   overflow: hidden;
 }
 

@@ -1007,42 +1007,58 @@ function renderVmTable() {
     return
   }
   els.vmTable.innerHTML = `
-    <div class="vm-list">
-      <div class="vm-list-head">
-        <span>名称</span>
-        <span>Owner</span>
-        <span>Cluster</span>
-        <span>Node</span>
-        <span>VMID</span>
-        <span>IP</span>
-        <span>SG</span>
-        <span>Sync</span>
-        <span>Power</span>
-        <span>更新时间</span>
-      </div>
-      ${filtered
-          .map(
-            (vm) => `
-            <section class="vm-card" data-vm-id="${vm.id}">
-              <div class="vm-card-main">
-                <div class="strong vm-card-name">${scrollText(vm.vmname)}</div>
-                <div>${scrollText(vm.owner_username)}</div>
-                <div>${scrollText(displayClusterName(vm.cluster_key))}</div>
-                <div>${scrollText(vm.node ?? 'auto')}</div>
-                <div>${vm.vmid}</div>
-                <div class="mono">${scrollText(vm.ip, 'mono')}</div>
-                <div>${scrollText(vm.security_group_name)}</div>
-                <div>${statusBadge(vm.sync_state)}</div>
-                <div>${scrollText(powerFrom(vm))}</div>
-                <div>${scrollText(formatTime(vm.updated_at))}</div>
-              </div>
-              <div class="vm-card-actions">
-                ${rowActions(vm)}
-              </div>
-            </section>
-          `,
-        )
-        .join('')}
+    <div class="table-wrap vm-table-wrap">
+      <table class="vm-table">
+        <colgroup>
+          <col class="col-vm-name" />
+          <col class="col-vm-actions" />
+          <col class="col-vm-owner" />
+          <col class="col-vm-cluster" />
+          <col class="col-vm-node" />
+          <col class="col-vm-vmid" />
+          <col class="col-vm-ip" />
+          <col class="col-vm-sg" />
+          <col class="col-vm-sync" />
+          <col class="col-vm-power" />
+          <col class="col-vm-updated" />
+        </colgroup>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Actions</th>
+            <th>Owner</th>
+            <th>Cluster</th>
+            <th>Node</th>
+            <th>VMID</th>
+            <th>IP</th>
+            <th>SG</th>
+            <th>Sync</th>
+            <th>Power</th>
+            <th>更新时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${filtered
+            .map(
+              (vm) => `
+                <tr data-vm-id="${vm.id}">
+                  <td class="strong">${scrollText(displayVmName(vm), 'strong')}</td>
+                  <td class="actions-cell">${rowActions(vm)}</td>
+                  <td>${scrollText(vm.owner_username)}</td>
+                  <td>${scrollText(displayClusterName(vm.cluster_key))}</td>
+                  <td>${scrollText(vm.node ?? 'auto')}</td>
+                  <td>${vm.vmid}</td>
+                  <td class="mono">${scrollText(vm.ip, 'mono')}</td>
+                  <td>${scrollText(vm.security_group_name)}</td>
+                  <td>${statusBadge(vm.sync_state)}</td>
+                  <td>${scrollText(powerFrom(vm))}</td>
+                  <td>${scrollText(formatTime(vm.updated_at))}</td>
+                </tr>
+              `,
+            )
+            .join('')}
+        </tbody>
+      </table>
     </div>
   `
 }
@@ -1460,7 +1476,7 @@ function renderAdminVMs() {
           .map(
             (vm) => `
               <tr>
-                <td class="strong">${scrollText(vm.vmname, 'strong')}</td>
+                <td class="strong">${scrollText(displayVmName(vm), 'strong')}</td>
                 <td class="actions-cell">${adminVmActions(vm)}</td>
                 <td>${scrollText(vm.owner_username)}</td>
                 <td>${scrollText(displayClusterName(vm.cluster_key))}</td>
@@ -1778,7 +1794,7 @@ function fillVmDialog(vm: VM) {
   renderVmFormOptions()
   els.vmOwner.value = vm.owner_username
   els.vmTemplate.value = String(configNumber(vm.config, 'template_vmid', state.templates.find((tpl) => tpl.cluster_key === vm.cluster_key)?.template_vmid ?? 0) || '')
-  els.vmName.value = vm.vmname
+  els.vmName.value = stripVmNamePrefix(vm.owner_username, displayVmName(vm))
   els.vmCpuKey.value = configString(vm.config, 'cpu_key', cluster.cpu[0]?.key ?? '')
   els.vmCpuCores.value = String(configNumber(vm.config, 'cpu_cores', 1))
   els.vmMemoryGB.value = String(configNumber(vm.config, 'memory_gb', 1))
@@ -1806,7 +1822,7 @@ function fillAdoptVmDialog(vm: VM) {
   els.vmCluster.value = vm.cluster_key
   renderVmFormOptions()
   els.vmOwner.value = ''
-  els.vmName.value = vm.vmname
+  els.vmName.value = stripVmNamePrefix(vm.owner_username, displayVmName(vm))
   els.vmCpuKey.value = configString(vm.config, 'cpu_key', cluster.cpu[0]?.key ?? '')
   els.vmCpuCores.value = String(configNumber(vm.config, 'cpu_cores', 1))
   els.vmMemoryGB.value = String(configNumber(vm.config, 'memory_gb', 1))
@@ -1993,14 +2009,14 @@ function renderDetail(vm: VM) {
     : ''
   els.detailPageContent.innerHTML = `
     <div class="detail-grid">
-      <div><span class="label">Name</span><div>${escapeHtml(vm.vmname)}</div></div>
-      <div><span class="label">Owner</span><div>${escapeHtml(vm.owner_username)}</div></div>
-      <div><span class="label">Cluster</span><div>${escapeHtml(displayClusterName(vm.cluster_key))}</div></div>
-      <div><span class="label">Node</span><div>${escapeHtml(vm.node ?? 'auto')}</div></div>
+      <div><span class="label">Name</span><div>${scrollText(displayVmName(vm), 'strong')}</div></div>
+      <div><span class="label">Owner</span><div>${scrollText(vm.owner_username)}</div></div>
+      <div><span class="label">Cluster</span><div>${scrollText(displayClusterName(vm.cluster_key))}</div></div>
+      <div><span class="label">Node</span><div>${scrollText(vm.node ?? 'auto')}</div></div>
       <div><span class="label">VMID</span><div>${vm.vmid}</div></div>
-      <div><span class="label">IP</span><div class="mono">${escapeHtml(vm.ip)}</div></div>
-      <div><span class="label">Security Group</span><div>${escapeHtml(vm.security_group_name)}</div></div>
-      <div><span class="label">Boot Order</span><div>${escapeHtml(configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0')))}</div></div>
+      <div><span class="label">IP</span><div class="mono">${scrollText(vm.ip, 'mono')}</div></div>
+      <div><span class="label">Security Group</span><div>${scrollText(vm.security_group_name)}</div></div>
+      <div><span class="label">Boot Order</span><div>${scrollText(configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0')))}</div></div>
       <div><span class="label">Sync State</span><div>${statusBadge(vm.sync_state)}</div></div>
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
       <div><span class="label">任务队列</span><div>${vm.task_queue_paused ? '<span class="badge warn">已暂停</span>' : '<span class="badge ok">运行中</span>'}</div></div>
