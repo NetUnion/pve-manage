@@ -55,6 +55,29 @@ type patchVMRequest struct {
 	Power             *string   `json:"power"`
 }
 
+type powerVMRequest struct {
+	Power string `json:"power"`
+}
+
+func patchVMHasNonPowerChanges(req patchVMRequest) bool {
+	return req.OwnerUsername != nil ||
+		req.VMName != nil ||
+		req.Password != nil ||
+		req.CPUKey != nil ||
+		req.CPUCores != nil ||
+		req.MemoryGB != nil ||
+		req.StorageKey != nil ||
+		req.DiskGB != nil ||
+		req.BridgeKey != nil ||
+		req.BootOrder != nil ||
+		req.TemplateVMID != nil ||
+		req.SSHKeys != nil ||
+		req.SSHKeyIDs != nil ||
+		req.SharedUsernames != nil ||
+		req.SecurityGroupName != nil ||
+		req.UESTCRestricted != nil
+}
+
 type adoptVMRequest struct {
 	OwnerUsername      string   `json:"owner_username"`
 	VMName             string   `json:"vmname"`
@@ -85,6 +108,23 @@ type vmDetailResponse struct {
 	VM
 	Password string          `json:"password"`
 	Tasks    []vmTaskSummary `json:"tasks"`
+}
+
+func queueVMPowerTaskTx(ctx context.Context, tx *sql.Tx, vm *vmSummary, action string) error {
+	prefer := map[string]any{}
+	_ = json.Unmarshal(vm.PreferStatus, &prefer)
+	prefer["power"] = action
+	prefer["generation"] = intFromOrZero(prefer, "generation") + 1
+	preferBytes, _ := json.Marshal(prefer)
+	now := timestamp()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE vms
+		SET prefer_status_json = ?, sync_state = 'pending', sync_error = NULL, updated_at = ?
+		WHERE id = ?
+	`, string(preferBytes), now, vm.ID); err != nil {
+		return err
+	}
+	return queueVMTaskTx(ctx, tx, vm.ID, "power", map[string]any{"vm_id": vm.ID, "power": action})
 }
 
 type VM struct {
@@ -556,7 +596,30 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Power != nil {
-		s.jsonError(w, http.StatusBadRequest, "power changes must use the dedicated power actions")
+		if patchVMHasNonPowerChanges(req) {
+			s.jsonError(w, http.StatusBadRequest, "power changes must use the dedicated power actions")
+			return
+		}
+		action := strings.TrimSpace(strings.ToLower(*req.Power))
+		if action != "running" && action != "stopped" && action != "reboot" {
+			s.jsonError(w, http.StatusBadRequest, "invalid power")
+			return
+		}
+		tx, err := s.db.BeginTx(r.Context(), nil)
+		if err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := queueVMPowerTaskTx(r.Context(), tx, vm, action); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "power": action})
 		return
 	}
 
@@ -877,6 +940,72 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		vm.Password = ""
 	}
 	writeJSON(w, http.StatusOK, vm)
+}
+
+func (s *Server) handlePowerVM(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := parseInt64Param(r, "id")
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !s.vmVisibleToCurrentUser(vm, current) {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot be modified")
+		return
+	}
+	if vm.SyncState == "deleting" || vm.DeleteRequestedAt != nil {
+		s.jsonError(w, http.StatusBadRequest, "vm is pending deletion")
+		return
+	}
+
+	var req powerVMRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	action := strings.TrimSpace(strings.ToLower(req.Power))
+	if action != "running" && action != "stopped" && action != "reboot" {
+		s.jsonError(w, http.StatusBadRequest, "invalid power")
+		return
+	}
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := queueVMPowerTaskTx(r.Context(), tx, vm, action); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"power": action,
+	})
 }
 
 func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {

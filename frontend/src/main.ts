@@ -183,6 +183,7 @@ const state = {
   adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance',
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
+  vmWizardStage: 1,
   detailVmId: null as number | null,
   sgDialogMode: 'create' as 'create' | 'edit',
   sgDialogGroup: null as SecurityGroup | null,
@@ -342,35 +343,52 @@ app.innerHTML = `
       </div>
       <input type="hidden" id="vm-mode" value="create" />
       <input type="hidden" id="vm-id" />
-      <div id="vm-flow-hint" class="flow-hint"></div>
-      <div class="form-grid">
+      <div id="vm-wizard-progress" class="wizard-progress"></div>
+      <section id="vm-cluster-section" class="wizard-section">
+        <div class="wizard-step-title">1. 选择 Cluster</div>
+        <div id="vm-cluster-help" class="wizard-step-help"></div>
         <label>Cluster<select id="vm-cluster" class="input"></select></label>
-        <label id="vm-owner-row" class="hidden">Owner<input id="vm-owner" class="input" placeholder="owner username" /></label>
-        <label id="vm-template-row">Template<select id="vm-template" class="input"></select></label>
-        <label>名称<input id="vm-name" class="input" /></label>
-        <label>CPU Key<select id="vm-cpu-key" class="input"></select></label>
-        <label>CPU 核数<input id="vm-cpu-cores" class="input" type="number" min="1" /></label>
-        <label>Memory GB<input id="vm-memory-gb" class="input" type="number" min="1" /></label>
-        <label>Storage Key<select id="vm-storage-key" class="input"></select></label>
-        <label>Disk GB<input id="vm-disk-gb" class="input" type="number" min="20" /></label>
-        <label>Bridge<select id="vm-bridge-key" class="input"></select></label>
-        <label>Boot Order<select id="vm-boot-order" class="input">
-          <option value="order=scsi0;ide0">disk first</option>
-          <option value="order=ide0;scsi0">cdrom first</option>
-        </select></label>
-        <label>Security Group<select id="vm-sg" class="input"></select></label>
-        <label>Password<input id="vm-password" class="input" type="password" autocomplete="new-password" placeholder="留空则随机生成或保持不变" /></label>
-        <label class="checkbox-row"><input id="vm-uestc" type="checkbox" /> uestc restriction</label>
-      </div>
-      <div id="vm-limit-hint" class="limit-hint"></div>
-      <div class="ssh-picker">
+      </section>
+      <section id="vm-config-section" class="wizard-section">
+        <div class="wizard-step-title">2. 选择 CPU / 存储 / 模板</div>
+        <div id="vm-limit-hint" class="limit-hint"></div>
+        <div class="form-grid compact">
+          <label id="vm-owner-row" class="hidden">Owner<input id="vm-owner" class="input" placeholder="owner username" /></label>
+          <label id="vm-template-row">Template<select id="vm-template" class="input"></select></label>
+          <label>名称<input id="vm-name" class="input" /></label>
+          <label>CPU Key<select id="vm-cpu-key" class="input"></select></label>
+          <label>CPU 核数<input id="vm-cpu-cores" class="input" type="number" min="1" /></label>
+          <label>Memory GB<input id="vm-memory-gb" class="input" type="number" min="1" /></label>
+          <label>Storage Key<select id="vm-storage-key" class="input"></select></label>
+          <label>Disk GB<input id="vm-disk-gb" class="input" type="number" min="20" /></label>
+          <label>Boot Order<select id="vm-boot-order" class="input">
+            <option value="order=scsi0;ide0">disk first</option>
+            <option value="order=ide0;scsi0">cdrom first</option>
+          </select></label>
+        </div>
+      </section>
+      <section id="vm-network-section" class="wizard-section">
+        <div class="wizard-step-title">3. 网络 / 安全组</div>
+        <div id="vm-network-help" class="wizard-step-help"></div>
+        <div class="form-grid compact">
+          <label>Bridge<select id="vm-bridge-key" class="input"></select></label>
+          <label>Security Group<select id="vm-sg" class="input"></select></label>
+          <label class="checkbox-row"><input id="vm-uestc" type="checkbox" /> uestc restriction</label>
+        </div>
+      </section>
+      <section id="vm-access-section" class="wizard-section">
+        <div class="wizard-step-title">4. 访问与共享</div>
+        <div id="vm-access-help" class="wizard-step-help"></div>
+        <div class="ssh-picker">
         <div class="section-title-row">
           <h4>SSH Keys</h4>
           <button type="button" id="ssh-shortcut-btn" class="btn btn-ghost">管理 SSH Keys</button>
         </div>
         <div id="vm-sshkey-list" class="ssh-checklist"></div>
-      </div>
-      <label>Shared Usernames<textarea id="vm-shared" class="input textarea" placeholder="one username per line"></textarea></label>
+        </div>
+        <label>Password<input id="vm-password" class="input" type="password" autocomplete="new-password" placeholder="留空则随机生成或保持不变" /></label>
+        <label>Shared Usernames<textarea id="vm-shared" class="input textarea" placeholder="one username per line"></textarea></label>
+      </section>
       <div class="dialog-actions">
         <button type="button" class="btn btn-ghost" data-close-dialog="vm-dialog">取消</button>
         <button type="submit" class="btn btn-primary" id="vm-submit">保存</button>
@@ -507,7 +525,9 @@ const els = {
   sshName: $('#ssh-name') as HTMLInputElement,
   sshKey: $('#ssh-key') as HTMLTextAreaElement,
   vmId: $('#vm-id') as HTMLInputElement,
-  vmFlowHint: $('#vm-flow-hint'),
+  vmClusterHelp: $('#vm-cluster-help'),
+  vmNetworkHelp: $('#vm-network-help'),
+  vmAccessHelp: $('#vm-access-help'),
   vmCluster: $('#vm-cluster') as HTMLSelectElement,
   vmOwner: $('#vm-owner') as HTMLInputElement,
   vmOwnerRow: $('#vm-owner-row'),
@@ -541,6 +561,11 @@ const els = {
   detailContent: $('#detail-content'),
   ipVmId: $('#ip-vm-id') as HTMLInputElement,
   ipValue: $('#ip-value') as HTMLInputElement,
+  vmWizardProgress: $('#vm-wizard-progress'),
+  vmClusterSection: $('#vm-cluster-section'),
+  vmConfigSection: $('#vm-config-section'),
+  vmNetworkSection: $('#vm-network-section'),
+  vmAccessSection: $('#vm-access-section'),
 }
 
 function escapeHtml(value: string): string {
@@ -979,14 +1004,8 @@ function renderVmLimitHint() {
   const diskLimit = Math.max(0, Math.min(storage?.limit ?? 0, quotaStorage + editBonusDisk))
   const countLimit = Math.max(0, quotaCount + editBonusCount)
   const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
-  const modeText =
-    state.vmDialogMode === 'create'
-      ? '创建时'
-      : state.vmDialogMode === 'adopt'
-        ? '接管时'
-        : '修改时'
   els.vmLimitHint.innerHTML = `
-    <div class="limit-hint-title">${escapeHtml(modeText)}可选范围</div>
+    <div class="limit-hint-title">可选范围</div>
     <div class="limit-hint-grid">
       <span>CPU 核数 1 - ${cpuLimit || '-'}</span>
       <span>内存 GB 1 - ${memoryLimit || '-'}</span>
@@ -1006,26 +1025,129 @@ function renderVmLimitHint() {
   }
 }
 
-function renderVmFlowHint() {
+function renderVmWizardProgress() {
   const cluster = currentCluster()
-  const cpu = cluster?.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster?.cpu[0]
-  const storage = cluster?.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster?.storage[0]
-  const title = cluster ? `当前 Cluster：${cluster.name}` : '先选择 Cluster'
-  const quotaCPU = remainingQuotaValue('cpu', 'cpu')
-  const quotaMemory = remainingQuotaValue('memory', 'memory')
-  const quotaStorage = remainingQuotaValue('storage', 'storage')
-  const body = [
-    '1. 先选 Cluster，再选 CPU / 存储 / 模板。',
-    cpu ? `CPU 可选：1 - ${Math.max(0, Math.min(cpu.limit || 0, quotaCPU || 0)) || '-'} 核，内存 1 - ${Math.max(0, Math.min(cpu.memory_limit ?? cpu.limit ?? 0, quotaMemory || 0)) || '-'} GB。` : 'CPU 暂无可选项。',
-    storage ? `磁盘可选：20 - ${Math.max(0, Math.min(storage.limit || 0, quotaStorage || 0)) || '-'} GB。` : '磁盘暂无可选项。',
-    '后面的选项只会在当前 Cluster 的范围里展开。',
+  const steps = [
+    {
+      title: '1. Cluster',
+      detail: cluster ? displayClusterName(cluster.key) : '先选集群',
+    },
+    {
+      title: '2. 资源',
+      detail: cluster ? 'CPU / 存储 / 模板' : '等待 Cluster',
+    },
+    {
+      title: '3. 网络',
+      detail: cluster ? 'Bridge / Security Group' : '等待前一步',
+    },
+    {
+      title: '4. 访问',
+      detail: 'SSH Keys / 密码 / 共享',
+    },
   ]
-  els.vmFlowHint.innerHTML = `
-    <div class="flow-hint-title">${escapeHtml(title)}</div>
-    <div class="flow-hint-body">
-      ${body.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
+  const active = state.vmDialogMode === 'create' ? state.vmWizardStage : 4
+  els.vmWizardProgress.innerHTML = `
+    <div class="wizard-progress-grid">
+      ${steps
+        .map((step, index) => {
+          const idx = index + 1
+          const cls = idx < active ? 'done' : idx === active ? 'active' : 'idle'
+          return `
+            <div class="wizard-progress-step ${cls}">
+              <div class="wizard-progress-step-title">${escapeHtml(step.title)}</div>
+              <div class="wizard-progress-step-detail">${escapeHtml(step.detail)}</div>
+            </div>
+          `
+        })
+        .join('')}
     </div>
   `
+}
+
+function renderVmWizardHelp() {
+  const cluster = currentCluster()
+  if (!cluster) {
+    els.vmClusterHelp.innerHTML = ''
+    els.vmNetworkHelp.innerHTML = ''
+    els.vmAccessHelp.innerHTML = ''
+    renderVmWizardProgress()
+    updateVmWizardVisibility()
+    return
+  }
+  const cpu = cluster.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster.cpu[0]
+  const storage = cluster.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster.storage[0]
+  const bridge = cluster.network.find((item) => item.key === els.vmBridgeKey.value) ?? cluster.network[0]
+  const clusterCpuNames = cluster.cpu.map((item) => item.name).join(' / ')
+  const cpuNodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
+  const clusterStorageNames = cluster.storage.map((item) => item.name).join(' / ')
+  const clusterBridgeNames = cluster.network.map((item) => item.key).join(' / ')
+  els.vmClusterHelp.innerHTML = `
+    <div class="wizard-step-summary">
+      <span>Cluster ${escapeHtml(cluster.name)}</span>
+      <span>VMID 范围 ${cluster.start_vmid} - ${cluster.start_vmid + cluster.limit - 1}</span>
+      <span>CPU 类型 ${escapeHtml(shortKey(clusterCpuNames || '无'))}</span>
+      <span>存储 ${escapeHtml(shortKey(clusterStorageNames || '无'))}</span>
+      <span>网络 ${escapeHtml(shortKey(clusterBridgeNames || '无'))}</span>
+    </div>
+  `
+  els.vmNetworkHelp.innerHTML = `
+    <div class="wizard-step-summary">
+      <span>Bridge ${escapeHtml(bridge?.key || '-')}</span>
+      <span>UESTC ${escapeHtml(bridge ? bridge.uestc : '-')}</span>
+      <span>IPv4 ${escapeHtml(bridge ? `${bridge.ipv4.start_ip}/${bridge.ipv4.cidr}` : '-')}</span>
+    </div>
+  `
+  els.vmAccessHelp.innerHTML = `
+    <div class="wizard-step-summary">
+      <span>SSH Keys：先在 SSH Keys 页面保存公钥，再回到这里选择</span>
+      <span>共享用户：只影响管理权，不影响资源归属</span>
+      <span>启动顺序：仅在 ${escapeHtml('disk first / cdrom first')} 两种组合里选</span>
+    </div>
+  `
+  if (cpu) {
+    els.vmLimitHint.innerHTML = `
+      <div class="limit-hint-title">资源范围</div>
+      <div class="limit-hint-grid">
+        <span>CPU 核数 1 - ${cpu.limit || '-'}</span>
+        <span>内存 GB 1 - ${cpu.memory_limit ?? cpu.limit ?? '-'}</span>
+        <span>可用节点 ${escapeHtml(cpuNodeText)}</span>
+      </div>
+    `
+  }
+  renderVmWizardProgress()
+  updateVmWizardVisibility()
+}
+
+function updateVmWizardVisibility() {
+  const createMode = state.vmDialogMode === 'create'
+  const stage = createMode ? state.vmWizardStage : 4
+  els.vmConfigSection.hidden = createMode && stage < 2
+  els.vmNetworkSection.hidden = createMode && stage < 3
+  els.vmAccessSection.hidden = createMode && stage < 4
+}
+
+function focusVmField(field: 'cpu' | 'storage' | 'bridge' | 'template' | 'name' | 'access') {
+  if (state.vmDialogMode !== 'create') return
+  switch (field) {
+    case 'cpu':
+      els.vmCpuKey.focus()
+      break
+    case 'storage':
+      els.vmStorageKey.focus()
+      break
+    case 'bridge':
+      els.vmBridgeKey.focus()
+      break
+    case 'template':
+      els.vmTemplate.focus()
+      break
+    case 'name':
+      els.vmName.focus()
+      break
+    case 'access':
+      els.vmSSHKeyList.querySelector<HTMLInputElement>('input[type="checkbox"]')?.focus()
+      break
+  }
 }
 
 function renderTemplates() {
@@ -1246,7 +1368,10 @@ function renderVmFormOptions() {
   const adminScope = Boolean(state.me?.is_admin) && (isAdopt || adminEdit)
   const groups = adminScope ? state.adminSecurityGroups : state.securityGroups
 
-  els.vmCluster.innerHTML = opts.map((cluster) => `<option value="${escapeHtml(cluster.key)}">${escapeHtml(cluster.name)}</option>`).join('')
+  els.vmCluster.innerHTML = opts.map((cluster) => {
+    const cpuNames = cluster.cpu.map((cpu) => cpu.name).join(' / ')
+    return `<option value="${escapeHtml(cluster.key)}">${escapeHtml(cluster.name)} · CPU: ${escapeHtml(shortKey(cpuNames || '无'))}</option>`
+  }).join('')
   if (previousCluster) {
     els.vmCluster.value = previousCluster
   }
@@ -1260,9 +1385,12 @@ function renderVmFormOptions() {
   const storageKeys = new Set(storageOptions.map((storage) => storage.key))
   const bridgeKeys = new Set(bridgeOptions.map((network) => network.key))
 
-  els.vmCpuKey.innerHTML = cpuOptions.map((cpu) => `<option value="${escapeHtml(cpu.key)}">${escapeHtml(cpu.name)}</option>`).join('')
-  els.vmStorageKey.innerHTML = storageOptions.map((s) => `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)}</option>`).join('')
-  els.vmBridgeKey.innerHTML = bridgeOptions.map((n) => `<option value="${escapeHtml(n.key)}">${escapeHtml(n.key)}</option>`).join('')
+  els.vmCpuKey.innerHTML = cpuOptions.map((cpu) => {
+    const nodes = cpu.node.length ? cpu.node.join(', ') : '全部节点'
+    return `<option value="${escapeHtml(cpu.key)}">${escapeHtml(cpu.name)} · ${cpu.limit} 核 / ${cpu.memory_limit} GB · ${escapeHtml(shortKey(nodes))}</option>`
+  }).join('')
+  els.vmStorageKey.innerHTML = storageOptions.map((s) => `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)} · ${s.limit} GB</option>`).join('')
+  els.vmBridgeKey.innerHTML = bridgeOptions.map((n) => `<option value="${escapeHtml(n.key)}">${escapeHtml(n.key)} · ${escapeHtml(n.uestc)}</option>`).join('')
   const templates = isAdopt ? [] : state.templates.filter((tpl) => tpl.cluster_key === cluster.key)
   const currentTemplateId = state.vmDialogVm ? configNumber(state.vmDialogVm.config, 'template_vmid', 0) : 0
   const templateOptions = templates.slice()
@@ -1336,8 +1464,9 @@ function renderVmFormOptions() {
     els.vmSubmit.disabled = !groups.length
   }
   renderVmLimitHint()
+  renderVmWizardHelp()
+  updateVmWizardVisibility()
   renderVmSSHKeyPicker()
-  renderVmFlowHint()
 }
 
 function parseLines(text: string): string[] {
@@ -1370,6 +1499,7 @@ function resetVmDialog() {
   els.vmUESTC.checked = false
   els.vmUESTC.disabled = false
   els.vmCluster.disabled = false
+  state.vmWizardStage = 1
   renderVmFormOptions()
 }
 
@@ -1399,6 +1529,7 @@ function fillVmDialog(vm: VM) {
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
+  state.vmWizardStage = 4
   renderVmSSHKeyPicker()
 }
 
@@ -1426,6 +1557,7 @@ function fillAdoptVmDialog(vm: VM) {
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
   els.vmCluster.disabled = true
+  state.vmWizardStage = 4
   renderVmSSHKeyPicker()
 }
 
@@ -1441,6 +1573,9 @@ function openVmDialog(mode: 'create' | 'edit' | 'adopt', vm?: VM) {
     }
   }
   showDialog(els.vmDialog)
+  if (mode === 'create') {
+    window.setTimeout(() => els.vmCluster.focus(), 0)
+  }
 }
 
 function addRuleRow(rule: Rule = {
@@ -2013,8 +2148,8 @@ async function deleteNowVm(id: number) {
 
 async function patchVmPower(id: number, power: string) {
   try {
-    await api(`/api/vms/${id}`, {
-      method: 'PATCH',
+    await api(`/api/vms/${id}/power`, {
+      method: 'POST',
       body: JSON.stringify({ power }),
     })
     flash(`已提交 ${power} 请求。`, 'ok')
@@ -2108,7 +2243,39 @@ function bindEvents() {
     void loadActiveTab()
   })
   els.vmCluster.addEventListener('change', () => {
+    if (state.vmDialogMode === 'create') {
+      state.vmWizardStage = 2
+    }
     renderVmFormOptions()
+    focusVmField('cpu')
+  })
+  els.vmCpuKey.addEventListener('change', () => {
+    if (state.vmDialogMode === 'create' && state.vmWizardStage < 3) {
+      state.vmWizardStage = 3
+    }
+    renderVmFormOptions()
+    focusVmField('storage')
+  })
+  els.vmStorageKey.addEventListener('change', () => {
+    if (state.vmDialogMode === 'create' && state.vmWizardStage < 3) {
+      state.vmWizardStage = 3
+    }
+    renderVmFormOptions()
+    focusVmField('bridge')
+  })
+  els.vmBridgeKey.addEventListener('change', () => {
+    if (state.vmDialogMode === 'create' && state.vmWizardStage < 4) {
+      state.vmWizardStage = 4
+    }
+    renderVmFormOptions()
+    focusVmField('template')
+  })
+  els.vmTemplate.addEventListener('change', () => {
+    if (state.vmDialogMode === 'create' && state.vmWizardStage < 4) {
+      state.vmWizardStage = 4
+    }
+    renderVmFormOptions()
+    focusVmField('name')
   })
   els.vmForm.addEventListener('submit', submitVmForm)
   els.sshForm.addEventListener('submit', submitSSHForm)

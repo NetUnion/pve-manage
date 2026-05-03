@@ -73,6 +73,7 @@ func (s *Server) Handler() http.Handler {
 	r.Delete("/api/vms/{id}", s.handleDeleteVM)
 	r.Post("/api/vms/{id}/restore", s.handleRestoreVM)
 	r.Post("/api/vms/{id}/delete-now", s.handleDeleteNowVM)
+	r.Post("/api/vms/{id}/power", s.handlePowerVM)
 	r.Post("/api/vms/{id}/tasks/pause", s.handlePauseVMTasks)
 	r.Post("/api/vms/{id}/tasks/resume", s.handleResumeVMTasks)
 	r.Post("/api/vms/{id}/tasks/{task_id}/retry", s.handleRetryVMTask)

@@ -378,6 +378,12 @@ func (w *Worker) runTask(ctx context.Context, task vmTaskRow) error {
 	switch task.Kind {
 	case "provision", "apply":
 		err = w.syncVM(ctx, task.VM)
+	case "power":
+		var payload map[string]any
+		if e := json.Unmarshal([]byte(task.PayloadJSON), &payload); e != nil {
+			return fmt.Errorf("invalid power task payload: %w", e)
+		}
+		err = w.runPowerTask(ctx, task.VM, stringFromMap(payload, "power", ""))
 	case "reboot":
 		err = w.runRebootTask(ctx, task.VM)
 	case "delete":
@@ -393,6 +399,34 @@ func (w *Worker) runTask(ctx context.Context, task vmTaskRow) error {
 		return err
 	}
 	return w.markTaskDone(ctx, task.TaskID)
+}
+
+func (w *Worker) runPowerTask(ctx context.Context, vm vmRow, power string) error {
+	node := vm.Node
+	var err error
+	if node == "" {
+		node, _, err = w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID)
+		if err != nil {
+			return err
+		}
+	}
+	if node == "" {
+		return nil
+	}
+	if err := w.applyPower(ctx, vm, node, power); err != nil {
+		return err
+	}
+	status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	return w.markSynced(ctx, vm.ID, map[string]any{
+		"intent":         "present",
+		"power":          stringFromMap(status, "status", power),
+		"vmid":           vm.VMID,
+		"node":           node,
+		"last_synced_at": timestamp(),
+	})
 }
 
 func (w *Worker) runRebootTask(ctx context.Context, vm vmRow) error {
@@ -878,6 +912,13 @@ func (w *Worker) applyPower(ctx context.Context, vm vmRow, node string, power st
 		}
 		return w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID)
 	case "reboot":
+		status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
+		if err != nil {
+			return err
+		}
+		if stringFromMap(status, "status", "") != "running" {
+			return nil
+		}
 		return w.pve.RebootVM(ctx, vm.ClusterKey, node, vm.VMID)
 	case "", "unknown":
 		return nil
