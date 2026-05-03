@@ -76,7 +76,6 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/api/vms/{id}/tasks/pause", s.handlePauseVMTasks)
 	r.Post("/api/vms/{id}/tasks/resume", s.handleResumeVMTasks)
 	r.Post("/api/vms/{id}/tasks/{task_id}/retry", s.handleRetryVMTask)
-	r.Post("/api/vms/{id}/tasks/{task_id}/cancel", s.handleCancelVMTask)
 	r.Get("/api/ssh-keys", s.handleListSSHKeys)
 	r.Post("/api/ssh-keys", s.handleCreateSSHKey)
 	r.Delete("/api/ssh-keys/{id}", s.handleDeleteSSHKey)

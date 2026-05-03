@@ -344,12 +344,9 @@ app.innerHTML = `
         </select></label>
         <label>Security Group<select id="vm-sg" class="input"></select></label>
         <label>Password<input id="vm-password" class="input" type="password" autocomplete="new-password" placeholder="留空则随机生成或保持不变" /></label>
-        <label>Power<select id="vm-power" class="input">
-          <option value="running">running</option>
-          <option value="stopped">stopped</option>
-        </select></label>
         <label class="checkbox-row"><input id="vm-uestc" type="checkbox" /> uestc restriction</label>
       </div>
+      <div id="vm-limit-hint" class="limit-hint"></div>
       <div class="ssh-picker">
         <div class="section-title-row">
           <h4>SSH Keys</h4>
@@ -509,8 +506,8 @@ const els = {
   vmBootOrder: $('#vm-boot-order') as HTMLSelectElement,
   vmSg: $('#vm-sg') as HTMLSelectElement,
   vmPassword: $('#vm-password') as HTMLInputElement,
-  vmPower: $('#vm-power') as HTMLSelectElement,
   vmUESTC: $('#vm-uestc') as HTMLInputElement,
+  vmLimitHint: $('#vm-limit-hint'),
   vmSSHKeyList: $('#vm-sshkey-list'),
   vmShared: $('#vm-shared') as HTMLTextAreaElement,
   vmSubmit: $('#vm-submit') as HTMLButtonElement,
@@ -635,11 +632,6 @@ function realPowerFrom(vm: VM): string {
   return typeof power === 'string' ? power : 'unknown'
 }
 
-function normalizePowerChoice(value: string): 'running' | 'stopped' | 'reboot' {
-  if (value === 'stopped' || value === 'reboot') return value
-  return 'running'
-}
-
 function configString(config: Record<string, unknown>, key: string, fallback = ''): string {
   const value = config[key]
   return typeof value === 'string' && value ? value : fallback
@@ -716,8 +708,6 @@ function rowActions(vm: VM, allowAdminIp = false): string {
         ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="running">开机</button>` : ''}
         ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="stopped">关机</button>` : ''}
         ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="reboot">重启</button>` : ''}
-      ${vm.managed && !vm.task_queue_paused ? `<button class="btn btn-mini" data-action="pause-queue" data-id="${vm.id}">暂停任务</button>` : ''}
-      ${vm.managed && vm.task_queue_paused ? `<button class="btn btn-mini" data-action="resume-queue" data-id="${vm.id}">恢复任务</button>` : ''}
       ${userOwns(vm) ? `<button class="btn btn-mini" data-action="edit" data-id="${vm.id}">编辑</button>` : ''}
       ${userOwns(vm) ? `<button class="btn btn-mini btn-danger" data-action="delete" data-id="${vm.id}">删除</button>` : ''}
       ${allowAdminIp && vm.managed ? `<button class="btn btn-mini" data-action="admin-ip" data-id="${vm.id}">改IP</button>` : ''}
@@ -937,6 +927,35 @@ function renderVmSSHKeyPicker() {
       `
     })
     .join('')
+}
+
+function renderVmLimitHint() {
+  const cluster = currentCluster()
+  if (!cluster) {
+    els.vmLimitHint.innerHTML = ''
+    return
+  }
+  const cpu = cluster.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster.cpu[0]
+  const storage = cluster.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster.storage[0]
+  const cpuLimit = cpu?.limit ?? 0
+  const memoryLimit = cpu?.memory_limit ?? cpu?.limit ?? 0
+  const diskLimit = storage?.limit ?? 0
+  const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
+  const modeText =
+    state.vmDialogMode === 'create'
+      ? '创建时'
+      : state.vmDialogMode === 'adopt'
+        ? '接管时'
+        : '修改时'
+  els.vmLimitHint.innerHTML = `
+    <div class="limit-hint-title">${escapeHtml(modeText)}可选范围</div>
+    <div class="limit-hint-grid">
+      <span>CPU 核数 1 - ${cpuLimit || '-'}</span>
+      <span>内存 GB 1 - ${memoryLimit || '-'}</span>
+      <span>磁盘 GB 20 - ${diskLimit || '-'}</span>
+      <span>可用节点 ${escapeHtml(nodeText)}</span>
+    </div>
+  `
 }
 
 function renderTemplates() {
@@ -1220,9 +1239,17 @@ function renderVmFormOptions() {
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
+  const managedEdit = state.vmDialogMode === 'edit'
+  els.vmTemplate.disabled = managedEdit || isAdopt
+  els.vmCpuKey.disabled = managedEdit || isAdopt
+  els.vmStorageKey.disabled = managedEdit || isAdopt
+  els.vmBridgeKey.disabled = managedEdit || isAdopt
+  els.vmBootOrder.disabled = managedEdit || isAdopt
+  els.vmDiskGB.disabled = managedEdit || isAdopt
   if (isAdopt) {
     els.vmSubmit.disabled = !groups.length
   }
+  renderVmLimitHint()
   renderVmSSHKeyPicker()
 }
 
@@ -1251,7 +1278,6 @@ function resetVmDialog() {
   els.vmMemoryGB.value = '1'
   els.vmDiskGB.value = '20'
   els.vmPassword.value = ''
-  els.vmPower.value = 'running'
   els.vmShared.value = ''
   els.vmBootOrder.value = 'order=scsi0;ide0'
   els.vmUESTC.checked = false
@@ -1282,7 +1308,6 @@ function fillVmDialog(vm: VM) {
   els.vmBridgeKey.value = configString(vm.config, 'bridge_key', cluster.network[0]?.key ?? '')
   els.vmSg.value = vm.security_group_name
   els.vmPassword.value = ''
-  els.vmPower.value = normalizePowerChoice(realPowerFrom(vm))
   els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
@@ -1309,7 +1334,6 @@ function fillAdoptVmDialog(vm: VM) {
   els.vmDiskGB.value = String(configNumber(vm.config, 'disk_gb', 20))
   els.vmBridgeKey.value = configString(vm.config, 'bridge_key', cluster.network[0]?.key ?? '')
   els.vmPassword.value = ''
-  els.vmPower.value = normalizePowerChoice(realPowerFrom(vm))
   els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
@@ -1471,13 +1495,6 @@ function renderDetail(vm: VM) {
     </div>
     <div class="detail-block">
       <h4>任务队列</h4>
-      <div class="detail-toolbar">
-        ${
-          vm.task_queue_paused
-            ? `<button type="button" class="btn btn-mini" data-task-action="resume-queue" data-vm-id="${vm.id}">恢复任务队列</button>`
-            : `<button type="button" class="btn btn-mini" data-task-action="pause-queue" data-vm-id="${vm.id}">暂停任务队列</button>`
-        }
-      </div>
       ${
       vm.tasks?.length
           ? `<div class="task-list">
@@ -1488,9 +1505,7 @@ function renderDetail(vm: VM) {
                   const taskActions =
                     task.status === 'failed'
                       ? `<button type="button" class="btn btn-mini" data-task-action="retry" data-task-id="${task.id}" data-vm-id="${vm.id}">重试</button>`
-                      : task.status === 'pending'
-                        ? `<button type="button" class="btn btn-mini" data-task-action="cancel" data-task-id="${task.id}" data-vm-id="${vm.id}">取消</button>`
-                        : ''
+                      : ''
                   return `
                     <section class="task-item">
                       <div class="task-head">
@@ -1681,14 +1696,13 @@ function buildCreateVmPayload(): Record<string, unknown> {
     shared_usernames: parseLines(els.vmShared.value),
     security_group_name: els.vmSg.value,
     uestc_restricted: els.vmUESTC.checked,
-    power: els.vmPower.value,
   }
 }
 
 function buildEditVmPayload(vm: VM): Record<string, unknown> {
   const ownerOnly = userOwns(vm) || Boolean(state.me?.is_admin)
   if (!ownerOnly) {
-    return { power: els.vmPower.value }
+    return {}
   }
   const payload: Record<string, unknown> = {
     vmname: els.vmName.value.trim(),
@@ -1705,7 +1719,6 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
     shared_usernames: parseLines(els.vmShared.value),
     security_group_name: els.vmSg.value,
     uestc_restricted: els.vmUESTC.checked,
-    power: els.vmPower.value,
   }
   if (state.me?.is_admin) {
     const owner = els.vmOwner.value.trim()
@@ -1736,7 +1749,6 @@ function buildAdoptVmPayload(): Record<string, unknown> {
     security_group_owner: securityGroupOwner,
     security_group_name: securityGroupName,
     uestc_restricted: els.vmUESTC.checked,
-    power: els.vmPower.value,
   }
 }
 
@@ -2075,33 +2087,6 @@ function bindEvents() {
       switch (taskAction.dataset.taskAction) {
         case 'retry':
           await retryVmTask(vmId, taskId)
-          break
-        case 'cancel':
-          try {
-            await api(`/api/vms/${vmId}/tasks/${taskId}/cancel`, { method: 'POST' })
-            flash('任务已取消。', 'ok')
-            await openDetailById(vmId)
-          } catch (err) {
-            flash((err as Error).message, 'error')
-          }
-          break
-        case 'pause-queue':
-          try {
-            await api(`/api/vms/${vmId}/tasks/pause`, { method: 'POST' })
-            flash('任务队列已暂停。', 'ok')
-            await openDetailById(vmId)
-          } catch (err) {
-            flash((err as Error).message, 'error')
-          }
-          break
-        case 'resume-queue':
-          try {
-            await api(`/api/vms/${vmId}/tasks/resume`, { method: 'POST' })
-            flash('任务队列已恢复。', 'ok')
-            await openDetailById(vmId)
-          } catch (err) {
-            flash((err as Error).message, 'error')
-          }
           break
       }
       return

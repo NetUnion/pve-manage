@@ -577,6 +577,37 @@ th {
   color: var(--text);
 }
 
+.input:disabled,
+select:disabled,
+textarea:disabled,
+button:disabled {
+  opacity: 0.62;
+  cursor: not-allowed;
+}
+
+.limit-hint {
+  margin: 4px 0 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(37, 99, 235, 0.14);
+  border-radius: 10px;
+  background: rgba(37, 99, 235, 0.06);
+  color: var(--text);
+}
+
+.limit-hint-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.limit-hint-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .checkbox-row {
   display: flex !important;
   align-items: center;

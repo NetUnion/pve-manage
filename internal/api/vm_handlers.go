@@ -551,6 +551,14 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.CPUKey != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.BootOrder != nil || req.TemplateVMID != nil {
+		s.jsonError(w, http.StatusBadRequest, "after creation only cpu_cores and memory_gb can be changed")
+		return
+	}
+	if req.Power != nil {
+		s.jsonError(w, http.StatusBadRequest, "power changes must use the dedicated power actions")
+		return
+	}
 
 	targetOwner := vm.OwnerUsername
 	if req.OwnerUsername != nil {
@@ -782,12 +790,10 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil {
+	if req.CPUCores != nil || req.MemoryGB != nil {
 		finalCPUKey, _ := cfg["cpu_key"].(string)
-		finalStorageKey, _ := cfg["storage_key"].(string)
 		finalCPUCores := intFromOrZero(cfg, "cpu_cores")
 		finalMemoryGB := intFromOrZero(cfg, "memory_gb")
-		finalDiskGB := intFromOrZero(cfg, "disk_gb")
 		clusterCfg, err := s.getClusterConfig(vm.ClusterKey)
 		if err != nil {
 			s.jsonError(w, http.StatusBadRequest, err.Error())
@@ -801,16 +807,8 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusBadRequest, "memory_gb exceed cluster option limit")
 			return
 		}
-		if storageOpt, ok := clusterCfg.StorageByKey(finalStorageKey); ok && finalDiskGB > storageOpt.Limit {
-			s.jsonError(w, http.StatusBadRequest, "disk_gb exceed cluster option limit")
-			return
-		}
-		if req.DiskGB != nil && *req.DiskGB < intFromOrZero(oldCfg, "disk_gb") {
-			s.jsonError(w, http.StatusBadRequest, "disk resize cannot shrink")
-			return
-		}
 		quota := s.effectiveQuota(current)
-		count, usedCPU, usedMemory, usedStorage, err := s.listUserVMUsage(r.Context(), current.Username)
+		count, usedCPU, usedMemory, _, err := s.listUserVMUsage(r.Context(), current.Username)
 		if err != nil {
 			s.jsonError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -820,14 +818,8 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		usedCPU += finalCPUCores
 		usedMemory -= intFromOrZero(oldCfg, "memory_gb")
 		usedMemory += finalMemoryGB
-		usedStorage -= intFromOrZero(oldCfg, "disk_gb")
-		usedStorage += finalDiskGB
-		if usedCPU > quota.CPU || usedMemory > quota.Memory || usedStorage > quota.Storage {
+		if usedCPU > quota.CPU || usedMemory > quota.Memory {
 			s.jsonError(w, http.StatusBadRequest, "quota exceeded")
-			return
-		}
-		if finalDiskGB < 20 {
-			s.jsonError(w, http.StatusBadRequest, "disk_gb must be at least 20")
 			return
 		}
 	}
