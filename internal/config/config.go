@@ -21,7 +21,6 @@ type Runtime struct {
 	ConfigPath string
 	OIDCPath   string
 	TokenPath  string
-	PolicyPath string
 }
 
 type Root struct {
@@ -124,33 +123,6 @@ type App struct {
 	Root    Root
 	OIDC    OIDC
 	Tokens  TokenFile
-	Policy  PolicyFile
-}
-
-type PolicyFile struct {
-	AutoShrink AutoShrinkPolicy `yaml:"auto_shrink"`
-}
-
-type AutoShrinkPolicy struct {
-	Enabled  bool             `yaml:"enabled"`
-	Policies []AutoShrinkRule `yaml:"policies"`
-}
-
-type AutoShrinkRule struct {
-	Enabled          *bool   `yaml:"enabled"`
-	ClusterKey       string  `yaml:"cluster_key"`
-	CPUKey           string  `yaml:"cpu_key"`
-	Window           string  `yaml:"window"`
-	CPURatioBelow    float64 `yaml:"cpu_ratio_below"`
-	MemoryRatioBelow float64 `yaml:"memory_ratio_below"`
-	ShrinkCPUCores   int     `yaml:"shrink_cpu_cores"`
-	ShrinkMemoryGB   int     `yaml:"shrink_memory_gb"`
-	MinCPUCores      int     `yaml:"min_cpu_cores"`
-	MinMemoryGB      int     `yaml:"min_memory_gb"`
-}
-
-func (r AutoShrinkRule) IsEnabled() bool {
-	return r.Enabled == nil || *r.Enabled
 }
 
 func Load(runtime Runtime) (*App, error) {
@@ -168,17 +140,12 @@ func Load(runtime Runtime) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load token config: %w", err)
 	}
-	policy, err := loadOptionalYAML[PolicyFile](runtime.PolicyPath)
-	if err != nil {
-		return nil, fmt.Errorf("load policy config: %w", err)
-	}
 
 	app := &App{
 		Runtime: runtime,
 		Root:    root,
 		OIDC:    oidc,
 		Tokens:  tokens,
-		Policy:  policy,
 	}
 
 	if err := app.Validate(); err != nil {
@@ -269,51 +236,7 @@ func (a *App) Validate() error {
 			return fmt.Errorf("token config cluster %s site and token are required", clusterKey)
 		}
 	}
-	if err := a.validatePolicy(); err != nil {
-		return err
-	}
 
-	return nil
-}
-
-func (a *App) validatePolicy() error {
-	if !a.Policy.AutoShrink.Enabled {
-		return nil
-	}
-	for i, rule := range a.Policy.AutoShrink.Policies {
-		if !rule.IsEnabled() {
-			continue
-		}
-		if rule.Window == "" {
-			return fmt.Errorf("auto_shrink policy %d window is required", i)
-		}
-		if _, err := time.ParseDuration(rule.Window); err != nil {
-			return fmt.Errorf("auto_shrink policy %d window is invalid: %w", i, err)
-		}
-		if rule.CPURatioBelow < 0 || rule.CPURatioBelow > 1 || rule.MemoryRatioBelow < 0 || rule.MemoryRatioBelow > 1 {
-			return fmt.Errorf("auto_shrink policy %d ratios must be between 0 and 1", i)
-		}
-		if rule.ShrinkCPUCores < 0 || rule.ShrinkMemoryGB < 0 {
-			return fmt.Errorf("auto_shrink policy %d shrink values must not be negative", i)
-		}
-		if rule.ShrinkCPUCores == 0 && rule.ShrinkMemoryGB == 0 {
-			return fmt.Errorf("auto_shrink policy %d must shrink cpu or memory", i)
-		}
-		if rule.MinCPUCores < 0 || rule.MinMemoryGB < 0 {
-			return fmt.Errorf("auto_shrink policy %d min values must not be negative", i)
-		}
-		if rule.ClusterKey != "" {
-			cluster, ok := a.Root.Cluster[rule.ClusterKey]
-			if !ok {
-				return fmt.Errorf("auto_shrink policy %d unknown cluster %s", i, rule.ClusterKey)
-			}
-			if rule.CPUKey != "" {
-				if _, ok := cluster.CPU[rule.CPUKey]; !ok {
-					return fmt.Errorf("auto_shrink policy %d unknown cpu_key %s", i, rule.CPUKey)
-				}
-			}
-		}
-	}
 	return nil
 }
 
@@ -411,18 +334,4 @@ func loadYAML[T any](path string) (T, error) {
 	}
 
 	return out, nil
-}
-
-func loadOptionalYAML[T any](path string) (T, error) {
-	var out T
-	if path == "" {
-		return out, nil
-	}
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return out, nil
-		}
-		return out, err
-	}
-	return loadYAML[T](path)
 }

@@ -167,7 +167,6 @@ func parseRuntime(args []string) (config.Runtime, error) {
 	fs.StringVar(&runtime.ConfigPath, "config", "config/config.yaml", "main config path")
 	fs.StringVar(&runtime.OIDCPath, "oidc", "config/oidc.yaml", "OIDC config path")
 	fs.StringVar(&runtime.TokenPath, "token", "config/token.yaml", "PVE token config path")
-	fs.StringVar(&runtime.PolicyPath, "policy", "config/policy.yaml", "optional policy config path")
 
 	if err := fs.Parse(args); err != nil {
 		return runtime, err
