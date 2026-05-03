@@ -187,8 +187,10 @@ CREATE INDEX IF NOT EXISTS idx_node_metrics_cluster_node_recorded
 		Version: 6,
 		Name:    "security_group_policy_columns",
 		SQL: `
-ALTER TABLE security_groups ADD COLUMN policy_in TEXT NOT NULL DEFAULT 'ACCEPT';
-ALTER TABLE security_groups ADD COLUMN policy_out TEXT NOT NULL DEFAULT 'ACCEPT';
+-- policy_in/policy_out were already present in the initial schema.
+-- Keep this migration as a no-op so fresh databases and older installs
+-- can both advance schema_migrations without trying to add duplicate columns.
+SELECT 1;
 `,
 	},
 	{
