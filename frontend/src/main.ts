@@ -640,7 +640,7 @@ function scrollText(value: string, className = '', threshold = 24): string {
     return `<span class="${className}">${escapeHtml(text)}</span>`
   }
   return `
-    <span class="cell-scroll ${className ? ` ${className}` : ''}">
+    <span class="cell-scroll ${className ? ` ${className}` : ''}" title="${escapeHtml(text)}">
       <span class="cell-scroll-track">
         <span>${escapeHtml(text)}</span>
         <span aria-hidden="true">${escapeHtml(text)}</span>
@@ -1386,7 +1386,22 @@ function renderAdminVMs() {
   }
   const items = sortedAdminVMs()
   els.adminVmTable.innerHTML = `
-    <table>
+    <table class="admin-vm-table">
+      <colgroup>
+        <col class="col-admin-name" />
+        <col class="col-admin-actions" />
+        <col class="col-admin-owner" />
+        <col class="col-admin-cluster" />
+        <col class="col-admin-node" />
+        <col class="col-admin-vmid" />
+        <col class="col-admin-ip" />
+        <col class="col-admin-metric" />
+        <col class="col-admin-metric" />
+        <col class="col-admin-metric" />
+        <col class="col-admin-metric" />
+        <col class="col-admin-managed" />
+        <col class="col-admin-sync" />
+      </colgroup>
       <thead><tr><th>Name</th><th>Actions</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>Managed</th><th>Sync</th></tr></thead>
       <tbody>
         ${items

@@ -416,6 +416,7 @@ select {
   min-width: 100%;
   gap: 24px;
   will-change: transform;
+  animation: cell-marquee 8s linear infinite;
 }
 
 .cell-scroll-track > span {
@@ -423,7 +424,7 @@ select {
 }
 
 .cell-scroll:hover .cell-scroll-track {
-  animation: cell-marquee 8s linear infinite;
+  animation-play-state: paused;
 }
 
 td .cell-scroll,
@@ -433,6 +434,51 @@ th .cell-scroll {
 
 .actions-cell {
   min-width: 340px;
+}
+
+.admin-vm-table {
+  table-layout: fixed;
+  min-width: 1580px;
+}
+
+.admin-vm-table .col-admin-name {
+  width: 220px;
+}
+
+.admin-vm-table .col-admin-actions {
+  width: 320px;
+}
+
+.admin-vm-table .col-admin-owner {
+  width: 160px;
+}
+
+.admin-vm-table .col-admin-cluster {
+  width: 180px;
+}
+
+.admin-vm-table .col-admin-node {
+  width: 100px;
+}
+
+.admin-vm-table .col-admin-vmid {
+  width: 84px;
+}
+
+.admin-vm-table .col-admin-ip {
+  width: 170px;
+}
+
+.admin-vm-table .col-admin-metric {
+  width: 102px;
+}
+
+.admin-vm-table .col-admin-managed {
+  width: 90px;
+}
+
+.admin-vm-table .col-admin-sync {
+  width: 110px;
 }
 
 .row-actions-grid {
@@ -470,6 +516,11 @@ th {
   color: #475569;
   font-weight: 600;
   z-index: 1;
+}
+
+.admin-vm-table th,
+.admin-vm-table td {
+  overflow: hidden;
 }
 
 .table-sort {
