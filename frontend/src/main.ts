@@ -749,6 +749,25 @@ function displayVmName(vm: VM): string {
   return vm.vmname.startsWith(prefix) ? vm.vmname.slice(prefix.length) : vm.vmname
 }
 
+function chooseCpuKeyForNode(cluster: ClusterOption, node?: string): string {
+  const targetNode = node?.trim()
+  const candidates = cluster.cpu.filter((cpu) => {
+    if (!targetNode) return true
+    return cpu.node.length === 0 || cpu.node.includes(targetNode)
+  })
+  const ranked = candidates.slice().sort((a, b) => {
+    const aSpecific = a.node.length > 0 && targetNode ? a.node.includes(targetNode) : false
+    const bSpecific = b.node.length > 0 && targetNode ? b.node.includes(targetNode) : false
+    if (aSpecific !== bSpecific) return aSpecific ? -1 : 1
+    if (b.limit !== a.limit) return b.limit - a.limit
+    const aMemory = a.memory_limit ?? 0
+    const bMemory = b.memory_limit ?? 0
+    if (bMemory !== aMemory) return bMemory - aMemory
+    return a.name.localeCompare(b.name)
+  })
+  return ranked[0]?.key ?? cluster.cpu[0]?.key ?? ''
+}
+
 function stripVmNamePrefix(owner: string, name: string): string {
   const prefix = `${owner.trim()}-`
   return name.startsWith(prefix) ? name.slice(prefix.length) : name
@@ -1668,6 +1687,7 @@ function renderVmFormOptions() {
   const cpuKeys = new Set(cpuOptions.map((cpu) => cpu.key))
   const storageKeys = new Set(storageOptions.map((storage) => storage.key))
   const bridgeKeys = new Set(bridgeOptions.map((network) => network.key))
+  const adoptNode = isAdopt ? state.vmDialogVm?.node : undefined
 
   els.vmCpuKey.innerHTML = cpuOptions.map((cpu) => {
     const nodes = cpu.node.length ? cpu.node.join(', ') : '全部节点'
@@ -1706,6 +1726,7 @@ function renderVmFormOptions() {
     : `<option value="">请先创建安全组</option>`
 
   if (previousCpu && cpuKeys.has(previousCpu)) els.vmCpuKey.value = previousCpu
+  if (!els.vmCpuKey.value && adoptNode) els.vmCpuKey.value = chooseCpuKeyForNode(cluster, adoptNode)
   if (!els.vmCpuKey.value && cpuOptions[0]) els.vmCpuKey.value = cpuOptions[0].key
   if (previousStorage && storageKeys.has(previousStorage)) els.vmStorageKey.value = previousStorage
   if (!els.vmStorageKey.value && storageOptions[0]) els.vmStorageKey.value = storageOptions[0].key
@@ -1814,6 +1835,7 @@ function fillVmDialog(vm: VM) {
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
   state.vmWizardStage = 4
+  renderVmFormOptions()
   renderVmSSHKeyPicker()
 }
 
@@ -1829,7 +1851,7 @@ function fillAdoptVmDialog(vm: VM) {
   renderVmFormOptions()
   els.vmOwner.value = ''
   els.vmName.value = stripVmNamePrefix(vm.owner_username, displayVmName(vm))
-  els.vmCpuKey.value = configString(vm.config, 'cpu_key', cluster.cpu[0]?.key ?? '')
+  els.vmCpuKey.value = configString(vm.config, 'cpu_key', chooseCpuKeyForNode(cluster, vm.node))
   els.vmCpuCores.value = String(configNumber(vm.config, 'cpu_cores', 1))
   els.vmMemoryGB.value = String(configNumber(vm.config, 'memory_gb', 1))
   els.vmStorageKey.value = configString(vm.config, 'storage_key', cluster.storage[0]?.key ?? '')
@@ -1842,6 +1864,7 @@ function fillAdoptVmDialog(vm: VM) {
   els.vmShared.value = vm.shared_usernames.join('\n')
   els.vmCluster.disabled = true
   state.vmWizardStage = 4
+  renderVmFormOptions()
   renderVmSSHKeyPicker()
 }
 
