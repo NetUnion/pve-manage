@@ -433,6 +433,8 @@ app.innerHTML = `
       </section>
       <div class="dialog-actions">
         <button type="button" class="btn btn-ghost" data-close-dialog="vm-dialog">取消</button>
+        <button type="button" class="btn btn-ghost" id="vm-wizard-back">上一步</button>
+        <button type="button" class="btn btn-primary" id="vm-wizard-next">下一步</button>
         <button type="submit" class="btn btn-primary" id="vm-submit">保存</button>
       </div>
     </form>
@@ -576,6 +578,8 @@ const els = {
   vmUESTC: $('#vm-uestc') as HTMLInputElement,
   vmLimitHint: $('#vm-limit-hint'),
   vmSSHKeyList: $('#vm-sshkey-list'),
+  vmWizardBack: $('#vm-wizard-back') as HTMLButtonElement,
+  vmWizardNext: $('#vm-wizard-next') as HTMLButtonElement,
   vmShared: $('#vm-shared') as HTMLTextAreaElement,
   vmSubmit: $('#vm-submit') as HTMLButtonElement,
   sshSubmit: $('#ssh-submit') as HTMLButtonElement,
@@ -1288,11 +1292,49 @@ function updateVmWizardVisibility() {
   els.vmConfigSection.hidden = createMode && stage < 2
   els.vmNetworkSection.hidden = createMode && stage < 3
   els.vmAccessSection.hidden = createMode && stage < 4
+  updateVmWizardControls()
 }
 
-function focusVmField(field: 'cpu' | 'storage' | 'bridge' | 'template' | 'name' | 'access') {
+function wizardStepReady(stage: number): boolean {
+  const cluster = currentCluster()
+  if (!cluster) return false
+  switch (stage) {
+    case 1:
+      return Boolean(els.vmCluster.value)
+    case 2:
+      return Boolean(
+        els.vmName.value.trim() &&
+          els.vmCpuKey.value &&
+          Number(els.vmCpuCores.value) > 0 &&
+          Number(els.vmMemoryGB.value) > 0 &&
+          els.vmStorageKey.value &&
+          Number(els.vmDiskGB.value) >= 20 &&
+          els.vmTemplate.value,
+      )
+    case 3:
+      return Boolean(els.vmBridgeKey.value && els.vmSg.value)
+    default:
+      return true
+  }
+}
+
+function updateVmWizardControls() {
+  const createMode = state.vmDialogMode === 'create'
+  const stage = createMode ? state.vmWizardStage : 4
+  const createBlocked = createMode && (!state.templates.length || !state.securityGroups.length)
+  els.vmWizardBack.hidden = !createMode || stage <= 1
+  els.vmWizardNext.hidden = !createMode || stage >= 4
+  els.vmWizardNext.disabled = createMode && !wizardStepReady(stage)
+  els.vmSubmit.hidden = createMode && stage < 4
+  els.vmSubmit.disabled = createBlocked || (createMode && stage < 4)
+}
+
+function focusVmField(field: 'cluster' | 'cpu' | 'storage' | 'bridge' | 'template' | 'name' | 'access') {
   if (state.vmDialogMode !== 'create') return
   switch (field) {
+    case 'cluster':
+      els.vmCluster.focus()
+      break
     case 'cpu':
       els.vmCpuKey.focus()
       break
@@ -1583,7 +1625,10 @@ function renderVmFormOptions() {
     els.vmCluster.value = previousCluster
   }
   const cluster = currentCluster()
-  if (!cluster) return
+  if (!cluster) {
+    updateVmWizardControls()
+    return
+  }
 
   const cpuOptions = cluster.cpu
   const storageOptions = cluster.storage
@@ -1648,7 +1693,6 @@ function renderVmFormOptions() {
   if (!els.vmSg.value && groups[0]) {
     els.vmSg.value = isAdopt ? `${groups[0].owner_username}::${groups[0].name}` : groups[0].name
   }
-  els.vmSubmit.disabled = state.vmDialogMode === 'create' && (!templateOptions.length || !groups.length)
 
   const network = cluster.network[0]
   if (network) {
@@ -1783,6 +1827,42 @@ function openVmDialog(mode: 'create' | 'edit' | 'adopt', vm?: VM) {
   if (mode === 'create') {
     window.setTimeout(() => els.vmCluster.focus(), 0)
   }
+}
+
+function advanceVmWizard(stepDelta: 1 | -1) {
+  if (state.vmDialogMode !== 'create') return
+  if (stepDelta > 0 && !wizardStepReady(state.vmWizardStage)) {
+    if (state.vmWizardStage === 1) {
+      flash('请先选择 Cluster。', 'error')
+      focusVmField('cluster')
+      return
+    }
+    if (state.vmWizardStage === 2) {
+      flash('请先填写名称、CPU、内存、磁盘和模板。', 'error')
+      focusVmField('name')
+      return
+    }
+    if (state.vmWizardStage === 3) {
+      flash('请先选择 Bridge 和 Security Group。', 'error')
+      focusVmField('bridge')
+      return
+    }
+  }
+  const nextStage = Math.min(4, Math.max(1, state.vmWizardStage + stepDelta))
+  if (nextStage === state.vmWizardStage) return
+  state.vmWizardStage = nextStage
+  renderVmFormOptions()
+  window.setTimeout(() => {
+    if (state.vmWizardStage === 1) {
+      focusVmField('cluster')
+    } else if (state.vmWizardStage === 2) {
+      focusVmField('cpu')
+    } else if (state.vmWizardStage === 3) {
+      focusVmField('bridge')
+    } else {
+      focusVmField('access')
+    }
+  }, 0)
 }
 
 function addRuleRow(rule: Rule = {
@@ -2373,6 +2453,10 @@ function buildAdoptVmPayload(): Record<string, unknown> {
 async function submitVmForm(event: SubmitEvent) {
   event.preventDefault()
   try {
+    if (state.vmDialogMode === 'create' && state.vmWizardStage < 4) {
+      flash('请先完成前面的步骤，再保存。', 'error')
+      return
+    }
     if (state.vmDialogMode === 'create') {
       await api('/api/vms', {
         method: 'POST',
@@ -2634,6 +2718,8 @@ function bindEvents() {
     renderVmFormOptions()
     focusVmField('cpu')
   })
+  els.vmWizardBack.addEventListener('click', () => advanceVmWizard(-1))
+  els.vmWizardNext.addEventListener('click', () => advanceVmWizard(1))
   els.vmCpuKey.addEventListener('change', () => {
     if (state.vmDialogMode === 'create' && state.vmWizardStage < 3) {
       state.vmWizardStage = 3
