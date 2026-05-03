@@ -214,6 +214,7 @@ const state = {
   vmDialogVm: null as VM | null,
   vmWizardStage: 1,
   detailVmId: null as number | null,
+  detailReturnPath: '/vms' as string,
   sgDialogMode: 'create' as 'create' | 'edit',
   sgDialogGroup: null as SecurityGroup | null,
   sgRules: [] as Rule[],
@@ -2631,6 +2632,7 @@ async function patchVmPower(id: number, power: string) {
 }
 
 async function openVmDetails(vm: VM) {
+  state.detailReturnPath = state.activeTab === 'admin' && state.adminTab === 'vms' ? '/admin/vms' : '/vms'
   await navigateTo(`/vms/${vm.id}`)
 }
 
@@ -2652,7 +2654,7 @@ async function openDetailById(id: number) {
 
 function backToVMList() {
   state.detailVM = null
-  void navigateTo('/admin/vms')
+  void navigateTo(state.detailReturnPath || '/vms')
 }
 
 function bindEvents() {
