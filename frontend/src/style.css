@@ -352,13 +352,13 @@ select {
 }
 
 .vm-list {
-  min-width: 1120px;
+  min-width: 1460px;
 }
 
 .vm-list-head,
 .vm-card-main {
   display: grid;
-  grid-template-columns: minmax(180px, 1.3fr) 100px 120px 80px minmax(180px, 1.1fr) 120px 96px 96px 140px;
+  grid-template-columns: minmax(190px, 1.4fr) minmax(110px, 0.8fr) minmax(180px, 1.1fr) minmax(100px, 0.8fr) 86px minmax(160px, 1fr) minmax(130px, 0.9fr) 92px 86px 150px 320px;
   gap: 10px;
   align-items: center;
 }
@@ -386,27 +386,92 @@ select {
 .vm-card-main {
   font-size: 14px;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .vm-card-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .vm-card-actions {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(216, 224, 236, 0.8);
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
-.vm-card-actions .row-actions {
+.row-actions {
+  min-width: 0;
+}
+
+.row-actions-inline {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  flex-wrap: wrap;
+  width: 320px;
+}
+
+.row-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  width: 320px;
+}
+
+.actions-cell {
+  width: 320px;
+}
+
+.actions-head {
+  width: 320px;
+}
+
+.row-actions-grid .btn,
+.row-actions-inline .btn {
+  white-space: nowrap;
+}
+
+.row-actions-grid .btn {
+  width: 100%;
+}
+
+.cell-text,
+.cell-ticker {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.cell-text {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cell-ticker {
+  white-space: nowrap;
+}
+
+.cell-ticker-track {
+  display: inline-flex;
+  gap: 2rem;
+  width: max-content;
+  animation: cell-marquee 9s linear infinite;
+}
+
+@keyframes cell-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 900px;
+  min-width: 1100px;
 }
 
 th,
@@ -785,6 +850,19 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
+}
+
+.detail-grid > div,
+.detail-grid .detail-block,
+.detail-grid.compact > div {
+  min-width: 0;
+}
+
+.detail-grid .mono,
+.detail-grid .label + div {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .detail-grid .label {

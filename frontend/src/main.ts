@@ -739,15 +739,32 @@ function statusBadge(label: string): string {
   return `<span class="badge ${cls}">${escapeHtml(display)}</span>`
 }
 
+function scrollText(value: string, threshold = 18): string {
+  const text = value && value.trim() ? value.trim() : '-'
+  const escaped = escapeHtml(text)
+  if (text.length <= threshold) {
+    return `<span class="cell-text">${escaped}</span>`
+  }
+  return `
+    <span class="cell-ticker" title="${escaped}">
+      <span class="cell-ticker-track">
+        <span>${escaped}</span>
+        <span aria-hidden="true">${escaped}</span>
+      </span>
+    </span>
+  `
+}
+
 function isDeletePending(vm: VM): boolean {
   return vm.sync_state === 'deleting' || Boolean(vm.delete_requested_at)
 }
 
-function rowActions(vm: VM, allowAdminIp = false): string {
+function rowActions(vm: VM, allowAdminIp = false, layout: 'inline' | 'grid' = 'inline'): string {
+  const layoutClass = layout === 'grid' ? 'row-actions-grid' : 'row-actions-inline'
   if (isDeletePending(vm)) {
     const canRestore = userOwns(vm) || state.me?.is_admin
     return `
-      <div class="row-actions">
+      <div class="row-actions ${layoutClass}">
         <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
         ${canRestore ? `<button class="btn btn-mini btn-warn" data-action="delete-now" data-id="${vm.id}">立即删除</button>` : ''}
         ${canRestore ? `<button class="btn btn-mini btn-warn" data-action="restore-delete" data-id="${vm.id}">恢复删除</button>` : ''}
@@ -755,7 +772,7 @@ function rowActions(vm: VM, allowAdminIp = false): string {
     `
   }
   return `
-      <div class="row-actions">
+      <div class="row-actions ${layoutClass}">
         <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
         ${!vm.managed ? `<button class="btn btn-mini" data-action="adopt" data-id="${vm.id}">接管</button>` : ''}
         ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="running">开机</button>` : ''}
@@ -840,25 +857,24 @@ function renderVmTable() {
         <span>Sync</span>
         <span>Power</span>
         <span>更新时间</span>
+        <span>操作</span>
       </div>
       ${filtered
         .map(
           (vm) => `
             <section class="vm-card" data-vm-id="${vm.id}">
               <div class="vm-card-main">
-                <div class="strong vm-card-name">${escapeHtml(vm.vmname)}</div>
-                <div>${escapeHtml(vm.owner_username)}</div>
-                <div>${escapeHtml(displayClusterName(vm.cluster_key))}</div>
-                <div>${escapeHtml(vm.node ?? 'auto')}</div>
+                <div class="strong vm-card-name">${scrollText(vm.vmname, 16)}</div>
+                <div>${scrollText(vm.owner_username, 14)}</div>
+                <div>${scrollText(displayClusterName(vm.cluster_key), 18)}</div>
+                <div>${scrollText(vm.node ?? 'auto', 12)}</div>
                 <div>${vm.vmid}</div>
-                <div class="mono">${escapeHtml(vm.ip)}</div>
-                <div>${escapeHtml(vm.security_group_name)}</div>
+                <div class="mono">${scrollText(vm.ip, 16)}</div>
+                <div>${scrollText(vm.security_group_name, 14)}</div>
                 <div>${statusBadge(vm.sync_state)}</div>
                 <div>${escapeHtml(powerFrom(vm))}</div>
                 <div>${escapeHtml(formatTime(vm.updated_at))}</div>
-              </div>
-              <div class="vm-card-actions">
-                ${rowActions(vm)}
+                <div class="vm-card-actions">${rowActions(vm)}</div>
               </div>
             </section>
           `,
@@ -1222,22 +1238,22 @@ function renderAdminVMs() {
   }
   els.adminVmTable.innerHTML = `
     <table>
-      <thead><tr><th>Name</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>Managed</th><th>Sync</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>Managed</th><th>Sync</th><th class="actions-head">操作</th></tr></thead>
       <tbody>
         ${state.allVMs
           .map(
             (vm) => `
               <tr>
-                <td class="strong">${escapeHtml(vm.vmname)}</td>
-                <td>${escapeHtml(vm.owner_username)}</td>
-                <td>${escapeHtml(displayClusterName(vm.cluster_key))}</td>
-                <td>${escapeHtml(vm.node ?? 'auto')}</td>
+                <td class="strong">${scrollText(vm.vmname, 16)}</td>
+                <td>${scrollText(vm.owner_username, 14)}</td>
+                <td>${scrollText(displayClusterName(vm.cluster_key), 18)}</td>
+                <td>${scrollText(vm.node ?? 'auto', 12)}</td>
                 <td>${vm.vmid}</td>
-                <td class="mono">${escapeHtml(vm.ip)}</td>
+                <td class="mono">${scrollText(vm.ip, 16)}</td>
                 <td>${vm.managed ? 'yes' : 'no'}</td>
                 <td>${statusBadge(vm.sync_state)}</td>
-                <td>
-                  ${rowActions(vm, true)}
+                <td class="actions-cell">
+                  ${rowActions(vm, true, 'grid')}
                 </td>
               </tr>
             `,
