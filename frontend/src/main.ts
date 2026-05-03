@@ -111,6 +111,8 @@ type VMMetricPoint = {
   time: string
   cpu: number
   memory: number
+  disk_read?: number
+  disk_write?: number
   disk_io: number
   network: number
 }
@@ -1924,14 +1926,77 @@ function renderDetail(vm: VM) {
 }
 
 function renderMetricCharts(points: VMMetricPoint[]): string {
-  const series = points.slice(-180)
+  const series = points
   return `
     <div class="metric-chart-grid">
       ${renderMetricChart(series, 'cpu', 'CPU MAX', formatPercent, '#2563eb')}
       ${renderMetricChart(series, 'memory', 'Memory MAX', formatPercent, '#7c3aed')}
-      ${renderMetricChart(series, 'disk_io', 'Disk IO MAX', formatRate, '#0f9d7a')}
+      ${renderDiskIOChart(series)}
       ${renderMetricChart(series, 'network', 'Network MAX', formatRate, '#d97706')}
     </div>
+  `
+}
+
+function renderDiskIOChart(points: VMMetricPoint[]): string {
+  const readValues = points.map((point) => metricNumber(point.disk_read ?? point.disk_io))
+  const writeValues = points.map((point) => metricNumber(point.disk_write ?? 0))
+  const latestRead = readValues[readValues.length - 1] ?? 0
+  const latestWrite = writeValues[writeValues.length - 1] ?? 0
+  const maxValue = Math.max(...readValues, ...writeValues, 0)
+  const readPath = chartPath(readValues, 0, maxValue)
+  const writePath = chartPath(writeValues, 0, maxValue)
+  const readArea = readPath ? `${readPath} L 620 176 L 60 176 Z` : ''
+  const writeArea = writePath ? `${writePath} L 620 176 L 60 176 Z` : ''
+  const readPoint = readValues.length ? chartPoint(readValues.length - 1, latestRead, readValues.length, 0, maxValue) : null
+  const writePoint = writeValues.length ? chartPoint(writeValues.length - 1, latestWrite, writeValues.length, 0, maxValue) : null
+  const firstTime = points[0]?.time ? formatTime(points[0].time) : '-'
+  const lastTime = points[points.length - 1]?.time ? formatTime(points[points.length - 1].time) : '-'
+  const midValue = maxValue / 2
+
+  return `
+    <section class="metric-chart-card disk-chart" style="--metric-color: #0f9d7a; --metric-color-2: #2563eb">
+      <div class="metric-chart-head">
+        <div>
+          <h5>Disk IO MAX</h5>
+          <div class="metric-chart-range">${escapeHtml(firstTime)} - ${escapeHtml(lastTime)}</div>
+        </div>
+        <div class="metric-chart-values">
+          <strong>${escapeHtml(formatRate(latestRead))}</strong>
+          <span>Read</span>
+          <strong class="metric-write-value">${escapeHtml(formatRate(latestWrite))}</strong>
+          <span>Write</span>
+        </div>
+      </div>
+      <svg class="metric-chart" viewBox="0 0 644 200" role="img" aria-label="Disk IO read and write chart" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="metric-gradient-disk-read" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#0f9d7a" stop-opacity="0.22" />
+            <stop offset="75%" stop-color="#0f9d7a" stop-opacity="0.03" />
+          </linearGradient>
+          <linearGradient id="metric-gradient-disk-write" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stop-color="#2563eb" stop-opacity="0.18" />
+            <stop offset="75%" stop-color="#2563eb" stop-opacity="0.02" />
+          </linearGradient>
+        </defs>
+        <text class="metric-y-label" x="20" y="35">${escapeHtml(formatRate(maxValue))}</text>
+        <text class="metric-y-label" x="20" y="107">${escapeHtml(formatRate(midValue))}</text>
+        <text class="metric-y-label" x="20" y="179">0</text>
+        <line class="metric-grid-line" x1="60" x2="620" y1="32" y2="32" />
+        <line class="metric-grid-line" x1="60" x2="620" y1="104" y2="104" />
+        <line class="metric-grid-line" x1="60" x2="620" y1="176" y2="176" />
+        ${readArea ? `<path class="metric-area" d="${readArea}" fill="url(#metric-gradient-disk-read)" />` : ''}
+        ${writeArea ? `<path class="metric-area" d="${writeArea}" fill="url(#metric-gradient-disk-write)" />` : ''}
+        ${readPath ? `<path class="metric-line metric-read-line" d="${readPath}" />` : ''}
+        ${writePath ? `<path class="metric-line metric-write-line" d="${writePath}" />` : ''}
+        ${readPoint ? `<circle class="metric-dot metric-read-dot" cx="${readPoint.x}" cy="${readPoint.y}" r="4.5" />` : ''}
+        ${writePoint ? `<circle class="metric-dot metric-write-dot" cx="${writePoint.x}" cy="${writePoint.y}" r="4.5" />` : ''}
+      </svg>
+      <div class="metric-chart-foot">
+        <span class="metric-legend read">Read</span>
+        <span class="metric-legend write">Write</span>
+        <span>Peak ${escapeHtml(formatRate(maxValue))}</span>
+      </div>
+    </section>
   `
 }
 
@@ -1947,11 +2012,12 @@ function renderMetricChart(
   const maxValue = Math.max(...values, key === 'cpu' || key === 'memory' ? 1 : 0)
   const minValue = 0
   const path = chartPath(values, minValue, maxValue)
-  const area = path ? `${path} L 620 176 L 24 176 Z` : ''
+  const area = path ? `${path} L 620 176 L 60 176 Z` : ''
   const lastPoint = values.length ? chartPoint(values.length - 1, values[values.length - 1] ?? 0, values.length, minValue, maxValue) : null
   const firstTime = points[0]?.time ? formatTime(points[0].time) : '-'
   const lastTime = points[points.length - 1]?.time ? formatTime(points[points.length - 1].time) : '-'
   const gradientId = `metric-gradient-${key}`
+  const midValue = (maxValue + minValue) / 2
 
   return `
     <section class="metric-chart-card" style="--metric-color: ${color}">
@@ -1969,9 +2035,12 @@ function renderMetricChart(
             <stop offset="75%" stop-color="${color}" stop-opacity="0.04" />
           </linearGradient>
         </defs>
-        <line class="metric-grid-line" x1="24" x2="620" y1="32" y2="32" />
-        <line class="metric-grid-line" x1="24" x2="620" y1="104" y2="104" />
-        <line class="metric-grid-line" x1="24" x2="620" y1="176" y2="176" />
+        <text class="metric-y-label" x="20" y="35">${escapeHtml(formatter(maxValue))}</text>
+        <text class="metric-y-label" x="20" y="107">${escapeHtml(formatter(midValue))}</text>
+        <text class="metric-y-label" x="20" y="179">0</text>
+        <line class="metric-grid-line" x1="60" x2="620" y1="32" y2="32" />
+        <line class="metric-grid-line" x1="60" x2="620" y1="104" y2="104" />
+        <line class="metric-grid-line" x1="60" x2="620" y1="176" y2="176" />
         ${area ? `<path class="metric-area" d="${area}" fill="url(#${gradientId})" />` : ''}
         ${path ? `<path class="metric-line" d="${path}" />` : ''}
         ${lastPoint ? `<circle class="metric-dot" cx="${lastPoint.x}" cy="${lastPoint.y}" r="4.5" />` : ''}
@@ -1995,9 +2064,9 @@ function chartPath(values: number[], minValue: number, maxValue: number): string
 }
 
 function chartPoint(index: number, value: number, count: number, minValue: number, maxValue: number): { x: string; y: string } {
-  const width = 596
+  const width = 560
   const height = 144
-  const x = 24 + (count <= 1 ? width : (index / (count - 1)) * width)
+  const x = 60 + (count <= 1 ? width : (index / (count - 1)) * width)
   const range = Math.max(maxValue - minValue, 1)
   const normalized = Math.max(0, Math.min(1, (value - minValue) / range))
   const y = 176 - normalized * height

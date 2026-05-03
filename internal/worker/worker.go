@@ -53,11 +53,13 @@ type vmRow struct {
 }
 
 type vmMetricPoint struct {
-	Time    string
-	CPU     float64
-	Memory  float64
-	DiskIO  float64
-	Network float64
+	Time      string  `json:"time"`
+	CPU       float64 `json:"cpu"`
+	Memory    float64 `json:"memory"`
+	DiskRead  float64 `json:"disk_read"`
+	DiskWrite float64 `json:"disk_write"`
+	DiskIO    float64 `json:"disk_io"`
+	Network   float64 `json:"network"`
 }
 
 type vmTaskRow struct {
@@ -1110,11 +1112,13 @@ func vmMetricsFromRRD(points []pve.VMRRDPoint) []vmMetricPoint {
 			memory = point.Mem / point.MaxMem
 		}
 		metrics = append(metrics, vmMetricPoint{
-			Time:    time.Unix(point.Time, 0).UTC().Format(time.RFC3339),
-			CPU:     point.CPU,
-			Memory:  memory,
-			DiskIO:  point.DiskRead + point.DiskWrite,
-			Network: point.NetIn + point.NetOut,
+			Time:      time.Unix(point.Time, 0).UTC().Format(time.RFC3339),
+			CPU:       point.CPU,
+			Memory:    memory,
+			DiskRead:  point.DiskRead,
+			DiskWrite: point.DiskWrite,
+			DiskIO:    point.DiskRead + point.DiskWrite,
+			Network:   point.NetIn + point.NetOut,
 		})
 	}
 	return metrics

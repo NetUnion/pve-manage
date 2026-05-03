@@ -514,6 +514,24 @@ th {
   white-space: nowrap;
 }
 
+.metric-chart-values {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: baseline;
+  text-align: right;
+}
+
+.metric-chart-values span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metric-chart-values .metric-write-value {
+  color: var(--metric-color-2);
+}
+
 .metric-chart-range,
 .metric-chart-foot {
   color: var(--muted);
@@ -534,6 +552,13 @@ th {
   stroke-width: 1;
 }
 
+.metric-y-label {
+  fill: rgba(95, 107, 132, 0.82);
+  font-size: 11px;
+  text-anchor: end;
+  dominant-baseline: middle;
+}
+
 .metric-line {
   fill: none;
   stroke: var(--metric-color);
@@ -546,6 +571,32 @@ th {
   fill: #ffffff;
   stroke: var(--metric-color);
   stroke-width: 3;
+}
+
+.metric-write-line {
+  stroke: var(--metric-color-2);
+}
+
+.metric-write-dot {
+  stroke: var(--metric-color-2);
+}
+
+.metric-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.metric-legend::before {
+  content: "";
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--metric-color);
+}
+
+.metric-legend.write::before {
+  background: var(--metric-color-2);
 }
 
 .metric-chart-foot {

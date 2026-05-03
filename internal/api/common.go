@@ -102,11 +102,13 @@ type vmMetrics struct {
 }
 
 type vmMetricPoint struct {
-	Time    string  `json:"time"`
-	CPU     float64 `json:"cpu"`
-	Memory  float64 `json:"memory"`
-	DiskIO  float64 `json:"disk_io"`
-	Network float64 `json:"network"`
+	Time      string  `json:"time"`
+	CPU       float64 `json:"cpu"`
+	Memory    float64 `json:"memory"`
+	DiskRead  float64 `json:"disk_read,omitempty"`
+	DiskWrite float64 `json:"disk_write,omitempty"`
+	DiskIO    float64 `json:"disk_io"`
+	Network   float64 `json:"network"`
 }
 
 type vmTaskSummary struct {
