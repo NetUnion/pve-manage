@@ -240,7 +240,7 @@ func (w *Worker) pendingMaintenanceTasks(ctx context.Context) ([]maintenanceTask
 func (w *Worker) runMaintenanceTask(ctx context.Context, task maintenanceTaskRow) error {
 	switch task.Kind {
 	case "inventory_scan":
-		return w.scanPVE(ctx)
+		return errors.Join(w.scanPVE(ctx), w.applyAutoShrinkPolicies(ctx))
 	default:
 		return fmt.Errorf("unknown maintenance task kind %q", task.Kind)
 	}
@@ -549,6 +549,275 @@ func (w *Worker) syncUnmanagedVMs(ctx context.Context) error {
 		w.logger.InfoContext(ctx, "existing pve vms scanned", "cluster", clusterKey, "count", count)
 	}
 	return nil
+}
+
+func (w *Worker) applyAutoShrinkPolicies(ctx context.Context) error {
+	policy := w.config.Policy.AutoShrink
+	if !policy.Enabled || len(policy.Policies) == 0 {
+		return nil
+	}
+	vms, err := w.autoshrinkCandidateVMs(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, vm := range vms {
+		rule, ok := w.autoShrinkRuleForVM(vm)
+		if !ok {
+			continue
+		}
+		if pending, err := w.vmHasPendingTasks(ctx, vm.ID); err != nil {
+			errs = append(errs, fmt.Errorf("vm %d pending tasks: %w", vm.ID, err))
+			continue
+		} else if pending {
+			continue
+		}
+		if err := w.applyAutoShrinkRule(ctx, vm, rule); err != nil {
+			errs = append(errs, fmt.Errorf("vm %d: %w", vm.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (w *Worker) autoshrinkCandidateVMs(ctx context.Context) ([]vmRow, error) {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, target_node, password, sshkeys_json, shared_usernames_json,
+		       security_group_name, uestc_restricted, config_json, prefer_status_json, real_status_json,
+		       sync_state, managed, task_queue_paused, version, delete_execute_after
+		FROM vms
+		WHERE deleted_at IS NULL
+		  AND delete_requested_at IS NULL
+		  AND managed = 1
+		  AND task_queue_paused = 0
+		  AND COALESCE(node, '') != ''
+		  AND sync_state = 'synced'
+		ORDER BY cluster_key, vmid
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]vmRow, 0)
+	for rows.Next() {
+		var current vmRow
+		if err := rows.Scan(
+			&current.ID,
+			&current.OwnerUsername,
+			&current.ClusterKey,
+			&current.VMID,
+			&current.VMName,
+			&current.IP,
+			&current.Node,
+			&current.TargetNode,
+			&current.Password,
+			&current.SSHKeysJSON,
+			&current.SharedUsernamesJSON,
+			&current.SecurityGroupName,
+			&current.UESTCRestricted,
+			&current.ConfigJSON,
+			&current.PreferStatusJSON,
+			&current.RealStatusJSON,
+			&current.SyncState,
+			&current.Managed,
+			&current.TaskQueuePaused,
+			&current.Version,
+			&current.DeleteExecuteAfter,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, current)
+	}
+	return items, rows.Err()
+}
+
+func (w *Worker) autoShrinkRuleForVM(vm vmRow) (config.AutoShrinkRule, bool) {
+	var cfg map[string]any
+	_ = json.Unmarshal([]byte(vm.ConfigJSON), &cfg)
+	cpuKey, _ := cfg["cpu_key"].(string)
+	for _, rule := range w.config.Policy.AutoShrink.Policies {
+		if !rule.IsEnabled() {
+			continue
+		}
+		if rule.ClusterKey != "" && rule.ClusterKey != vm.ClusterKey {
+			continue
+		}
+		if rule.CPUKey != "" && rule.CPUKey != cpuKey {
+			continue
+		}
+		return rule, true
+	}
+	return config.AutoShrinkRule{}, false
+}
+
+func (w *Worker) vmHasPendingTasks(ctx context.Context, vmID int64) (bool, error) {
+	var count int
+	if err := w.db.QueryRowContext(ctx, `
+		SELECT COUNT(1)
+		FROM vm_tasks
+		WHERE vm_id = ?
+		  AND status NOT IN ('done', 'canceled')
+	`, vmID).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (w *Worker) applyAutoShrinkRule(ctx context.Context, vm vmRow, rule config.AutoShrinkRule) error {
+	window, err := time.ParseDuration(rule.Window)
+	if err != nil {
+		return err
+	}
+	low, err := w.vmLoadBelowThreshold(ctx, vm, window, rule.CPURatioBelow, rule.MemoryRatioBelow)
+	if err != nil {
+		return err
+	}
+	if !low {
+		return nil
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(vm.ConfigJSON), &cfg); err != nil {
+		return fmt.Errorf("invalid config_json: %w", err)
+	}
+	var prefer map[string]any
+	if err := json.Unmarshal([]byte(vm.PreferStatusJSON), &prefer); err != nil {
+		return fmt.Errorf("invalid prefer_status_json: %w", err)
+	}
+	currentCPU := intFromMapAny(cfg, "cpu_cores")
+	currentMem := intFromMapAny(cfg, "memory_gb")
+	minCPU := rule.MinCPUCores
+	if minCPU <= 0 {
+		minCPU = 1
+	}
+	minMem := rule.MinMemoryGB
+	if minMem <= 0 {
+		minMem = 1
+	}
+	nextCPU := currentCPU
+	if rule.ShrinkCPUCores > 0 {
+		nextCPU = maxInt(minCPU, currentCPU-rule.ShrinkCPUCores)
+	}
+	nextMem := currentMem
+	if rule.ShrinkMemoryGB > 0 {
+		nextMem = maxInt(minMem, currentMem-rule.ShrinkMemoryGB)
+	}
+	if nextCPU >= currentCPU && nextMem >= currentMem {
+		return nil
+	}
+	cfg["cpu_cores"] = nextCPU
+	cfg["memory_gb"] = nextMem
+	prefer["cpu_cores"] = nextCPU
+	prefer["memory_gb"] = nextMem
+	prefer["generation"] = intFrom(prefer, "generation") + 1
+	prefer["auto_shrink"] = map[string]any{
+		"at":                 timestamp(),
+		"window":             rule.Window,
+		"cpu_ratio_below":    rule.CPURatioBelow,
+		"memory_ratio_below": rule.MemoryRatioBelow,
+		"from_cpu_cores":     currentCPU,
+		"to_cpu_cores":       nextCPU,
+		"from_memory_gb":     currentMem,
+		"to_memory_gb":       nextMem,
+	}
+	return w.updateVMShapeAndQueueApply(ctx, vm, cfg, prefer)
+}
+
+func (w *Worker) vmLoadBelowThreshold(ctx context.Context, vm vmRow, window time.Duration, cpuBelow float64, memBelow float64) (bool, error) {
+	status, err := w.pve.VMStatus(ctx, vm.ClusterKey, vm.Node, vm.VMID)
+	if err != nil {
+		return false, err
+	}
+	if stringFromMap(status, "status", "") != "running" {
+		return false, nil
+	}
+	points, err := w.pve.VMRRDData(ctx, vm.ClusterKey, vm.Node, vm.VMID, rrdTimeframe(window))
+	if err != nil {
+		return false, err
+	}
+	since := time.Now().UTC().Add(-window).Unix()
+	seen := false
+	for _, point := range points {
+		if point.Time < since {
+			continue
+		}
+		seen = true
+		if point.CPU >= cpuBelow {
+			return false, nil
+		}
+		if point.MaxMem <= 0 {
+			return false, nil
+		}
+		if float64(point.Mem)/float64(point.MaxMem) >= memBelow {
+			return false, nil
+		}
+	}
+	return seen, nil
+}
+
+func (w *Worker) updateVMShapeAndQueueApply(ctx context.Context, vm vmRow, cfg map[string]any, prefer map[string]any) error {
+	cfgJSON, _ := json.Marshal(cfg)
+	preferJSON, _ := json.Marshal(prefer)
+	now := timestamp()
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE vms
+		SET config_json = ?, prefer_status_json = ?, sync_state = 'pending', sync_error = NULL, updated_at = ?, version = version + 1
+		WHERE id = ?
+	`, string(cfgJSON), string(preferJSON), now, vm.ID); err != nil {
+		return err
+	}
+	if err := queueVMTaskWorkerTx(ctx, tx, vm.ID, "apply", map[string]any{"vm_id": vm.ID, "reason": "auto_shrink"}); err != nil {
+		return err
+	}
+	if err := queueVMTaskWorkerTx(ctx, tx, vm.ID, "reboot", map[string]any{"vm_id": vm.ID, "reason": "auto_shrink"}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func queueVMTaskWorkerTx(ctx context.Context, tx *sql.Tx, vmID int64, kind string, payload any) error {
+	var nextSeq int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1
+		FROM vm_tasks
+		WHERE vm_id = ?
+	`, vmID).Scan(&nextSeq); err != nil {
+		return err
+	}
+	payloadJSON, _ := json.Marshal(payload)
+	now := timestamp()
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
+		VALUES(?,?,?,?, 'pending', ?, ?)
+	`, vmID, nextSeq, kind, string(payloadJSON), now, now)
+	return err
+}
+
+func rrdTimeframe(window time.Duration) string {
+	switch {
+	case window <= time.Hour:
+		return "hour"
+	case window <= 24*time.Hour:
+		return "day"
+	case window <= 7*24*time.Hour:
+		return "week"
+	case window <= 31*24*time.Hour:
+		return "month"
+	default:
+		return "year"
+	}
+}
+
+func maxInt(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (w *Worker) syncVM(ctx context.Context, vm vmRow) error {
