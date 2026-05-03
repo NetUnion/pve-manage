@@ -1,13 +1,9 @@
 package pve
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -16,6 +12,7 @@ import (
 	"time"
 
 	"github.com/NetUnion/pve-manage/internal/config"
+	proxmox "github.com/luthermonson/go-proxmox"
 )
 
 const templatePoolID = "template-pool"
@@ -24,6 +21,7 @@ type Client struct {
 	logger     *slog.Logger
 	httpClient *http.Client
 	tokens     map[string]config.ClusterToken
+	clients    map[string]*proxmox.Client
 }
 
 type Resource struct {
@@ -84,21 +82,36 @@ type VMRRDPoint struct {
 }
 
 func NewClient(logger *slog.Logger, tokens config.TokenFile) *Client {
-	return &Client{
-		logger: logger,
-		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // PVE clusters often use private CA certificates.
-			},
+	httpClient := &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // PVE clusters often use private CA certificates.
 		},
-		tokens: tokens.Cluster,
 	}
+	client := &Client{
+		logger:     logger,
+		httpClient: httpClient,
+		tokens:     tokens.Cluster,
+		clients:    make(map[string]*proxmox.Client, len(tokens.Cluster)),
+	}
+	for clusterKey, token := range tokens.Cluster {
+		baseURL := proxmoxBaseURL(token.Site)
+		tokenID, secret := splitAPIToken(token.Token)
+		client.clients[clusterKey] = proxmox.NewClient(baseURL,
+			proxmox.WithHTTPClient(httpClient),
+			proxmox.WithAPIToken(tokenID, secret),
+		)
+	}
+	return client
 }
 
 func (c *Client) PingCluster(ctx context.Context, clusterKey string) error {
-	var out any
-	return c.request(ctx, clusterKey, http.MethodGet, "/version", nil, &out)
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	_, err = client.Version(ctx)
+	return err
 }
 
 func (c *Client) ListTemplates(ctx context.Context, clusterKey string) ([]Template, error) {
@@ -141,16 +154,18 @@ func (c *Client) ListTemplates(ctx context.Context, clusterKey string) ([]Templa
 }
 
 func (c *Client) EnsurePool(ctx context.Context, clusterKey, poolID string) error {
-	var out any
-	if err := c.request(ctx, clusterKey, http.MethodGet, "/pools/"+url.PathEscape(poolID), nil, &out); err == nil {
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	if _, err := client.Pool(ctx, poolID); err == nil {
 		return nil
 	} else {
-		var apiErr APIError
-		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
+		if !isNotFoundErr(err) {
 			return err
 		}
 	}
-	return c.request(ctx, clusterKey, http.MethodPost, "/pools", url.Values{"poolid": {poolID}}, nil)
+	return client.NewPool(ctx, poolID, "")
 }
 
 func (c *Client) SetPoolVMs(ctx context.Context, clusterKey, poolID string, vmids ...int) error {
@@ -167,7 +182,12 @@ func (c *Client) SetPoolVMs(ctx context.Context, clusterKey, poolID string, vmid
 	if len(parts) == 0 {
 		return nil
 	}
-	if err := c.request(ctx, clusterKey, http.MethodPut, "/pools/"+url.PathEscape(poolID), url.Values{"vms": {strings.Join(parts, ",")}}, nil); err != nil {
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	pool := &proxmox.Pool{PoolID: poolID}
+	if err := client.Put(ctx, "/pools/"+url.PathEscape(pool.PoolID), &proxmox.PoolUpdateOption{VirtualMachines: strings.Join(parts, ",")}, nil); err != nil {
 		if isAlreadyExistsErr(err) {
 			return nil
 		}
@@ -177,53 +197,64 @@ func (c *Client) SetPoolVMs(ctx context.Context, clusterKey, poolID string, vmid
 }
 
 func (c *Client) ListVMResources(ctx context.Context, clusterKey string) ([]Resource, error) {
-	var resources []Resource
-	if err := c.request(ctx, clusterKey, http.MethodGet, "/cluster/resources", url.Values{"type": {"vm"}}, &resources); err != nil {
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
 		return nil, err
+	}
+	cluster := (&proxmox.Cluster{}).New(client)
+	items, err := cluster.Resources(ctx, "vm")
+	if err != nil {
+		return nil, err
+	}
+	resources := make([]Resource, 0, len(items))
+	for _, item := range items {
+		resources = append(resources, Resource{
+			ID:       item.ID,
+			Node:     item.Node,
+			Type:     item.Type,
+			Status:   item.Status,
+			Name:     item.Name,
+			Template: item.Template,
+			VMID:     int(item.VMID),
+		})
 	}
 	return resources, nil
 }
 
 func (c *Client) ListVMSnapshots(ctx context.Context, clusterKey, node string, vmid int) ([]Snapshot, error) {
-	var raw json.RawMessage
-	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot", url.PathEscape(node), vmid), nil, &raw); err != nil {
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
 		return nil, err
 	}
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	if raw[0] == '[' {
-		var snaps []Snapshot
-		if err := json.Unmarshal(raw, &snaps); err != nil {
-			return nil, err
-		}
-		return snaps, nil
-	}
-	var resp struct {
-		Snapshots []Snapshot `json:"snapshots"`
-		Data      []Snapshot `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
+	vm := proxmox.VirtualMachine{}
+	vm.New(client, node, vmid)
+	items, err := vm.Snapshots(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if len(resp.Snapshots) > 0 {
-		return resp.Snapshots, nil
+	snaps := make([]Snapshot, 0, len(items))
+	for _, item := range items {
+		snaps = append(snaps, Snapshot{Name: item.Name})
 	}
-	return resp.Data, nil
+	return snaps, nil
 }
 
 func (c *Client) DeleteVMSnapshot(ctx context.Context, clusterKey, node string, vmid int, snapName string) error {
 	if snapName == "" || snapName == "current" {
 		return nil
 	}
-	if err := c.request(ctx, clusterKey, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s", url.PathEscape(node), vmid, url.PathEscape(snapName)), nil, nil); err != nil {
-		var apiErr APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+	var upid proxmox.UPID
+	if err := c.request(ctx, clusterKey, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d/snapshot/%s", url.PathEscape(node), vmid, url.PathEscape(snapName)), nil, &upid); err != nil {
+		if isNotFoundErr(err) {
 			return nil
 		}
 		return err
 	}
-	return nil
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, proxmox.NewTask(upid, client), 30*time.Minute)
 }
 
 func (c *Client) ListStorageContent(ctx context.Context, clusterKey, storage string, vmid int, content string) ([]StorageContent, error) {
@@ -246,8 +277,7 @@ func (c *Client) DeleteStorageContent(ctx context.Context, clusterKey, storage, 
 		return nil
 	}
 	if err := c.request(ctx, clusterKey, http.MethodDelete, "/storage/"+url.PathEscape(storage)+"/content/"+url.PathEscape(volid), nil, nil); err != nil {
-		var apiErr APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		if isNotFoundErr(err) {
 			return nil
 		}
 		return err
@@ -277,23 +307,29 @@ func (c *Client) GetVMConfig(ctx context.Context, clusterKey, node string, vmid 
 }
 
 func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode string, templateVMID int, targetNode string, newVMID int, name string, storage string, pool string) error {
-	params := url.Values{
-		"newid":   {strconv.Itoa(newVMID)},
-		"name":    {name},
-		"full":    {"1"},
-		"storage": {storage},
-	}
-	if pool != "" {
-		params.Set("pool", pool)
-	}
-	if targetNode != "" && targetNode != templateNode {
-		params.Set("target", targetNode)
-	}
-	var upid string
-	if err := c.request(ctx, clusterKey, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(templateNode), templateVMID), params, &upid); err != nil {
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
 		return err
 	}
-	return c.WaitTask(ctx, clusterKey, taskNodeFromUPID(upid, templateNode), upid, 30*time.Minute)
+	vm := proxmox.VirtualMachine{}
+	vm.New(client, templateNode, templateVMID)
+	params := &proxmox.VirtualMachineCloneOptions{
+		NewID:   newVMID,
+		Name:    name,
+		Full:    1,
+		Storage: storage,
+	}
+	if pool != "" {
+		params.Pool = pool
+	}
+	if targetNode != "" && targetNode != templateNode {
+		params.Target = targetNode
+	}
+	_, task, err := vm.Clone(ctx, params)
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, task, 30*time.Minute)
 }
 
 func (c *Client) SetVMConfig(ctx context.Context, clusterKey, node string, vmid int, params url.Values) error {
@@ -305,15 +341,17 @@ func (c *Client) ResizeDisk(ctx context.Context, clusterKey, node string, vmid i
 	if addMiB <= 0 {
 		return nil
 	}
-	var upid string
-	params := url.Values{
-		"disk": {disk},
-		"size": {fmt.Sprintf("+%dM", addMiB)},
-	}
-	if err := c.request(ctx, clusterKey, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/resize", url.PathEscape(node), vmid), params, &upid); err != nil {
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
 		return err
 	}
-	return c.WaitTask(ctx, clusterKey, taskNodeFromUPID(upid, node), upid, 30*time.Minute)
+	vm := proxmox.VirtualMachine{}
+	vm.New(client, node, vmid)
+	task, err := vm.ResizeDisk(ctx, disk, fmt.Sprintf("+%dM", addMiB))
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, task, 30*time.Minute)
 }
 
 func (c *Client) VMStatus(ctx context.Context, clusterKey, node string, vmid int) (map[string]any, error) {
@@ -364,15 +402,18 @@ func (c *Client) RebootVM(ctx context.Context, clusterKey, node string, vmid int
 }
 
 func (c *Client) DeleteVM(ctx context.Context, clusterKey, node string, vmid int) error {
-	var upid string
+	var upid proxmox.UPID
 	if err := c.request(ctx, clusterKey, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d", url.PathEscape(node), vmid), url.Values{"purge": {"1"}}, &upid); err != nil {
-		var apiErr APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		if isNotFoundErr(err) {
 			return nil
 		}
 		return err
 	}
-	return c.WaitTask(ctx, clusterKey, taskNodeFromUPID(upid, node), upid, 30*time.Minute)
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, proxmox.NewTask(upid, client), 30*time.Minute)
 }
 
 func (c *Client) EnsureFirewall(ctx context.Context, clusterKey, node string, vmid int, spec FirewallSpec) error {
@@ -400,115 +441,66 @@ func (c *Client) EnsureFirewall(ctx context.Context, clusterKey, node string, vm
 }
 
 func (c *Client) vmTask(ctx context.Context, clusterKey, node string, vmid int, action string) error {
-	var upid string
-	err := c.request(ctx, clusterKey, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/status/%s", url.PathEscape(node), vmid, action), nil, &upid)
+	client, err := c.clusterClient(clusterKey)
 	if err != nil {
 		return err
 	}
-	return c.WaitTask(ctx, clusterKey, taskNodeFromUPID(upid, node), upid, 10*time.Minute)
+	vm := proxmox.VirtualMachine{}
+	vm.New(client, node, vmid)
+	var task *proxmox.Task
+	switch action {
+	case "start":
+		task, err = vm.Start(ctx)
+	case "stop":
+		task, err = vm.Stop(ctx)
+	case "shutdown":
+		task, err = vm.Shutdown(ctx)
+	case "reboot":
+		task, err = vm.Reboot(ctx)
+	default:
+		return fmt.Errorf("unsupported vm task %q", action)
+	}
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, task, 10*time.Minute)
 }
 
 func (c *Client) WaitTask(ctx context.Context, clusterKey, node, upid string, timeout time.Duration) error {
 	if upid == "" {
 		return nil
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		var status struct {
-			Status     string `json:"status"`
-			ExitStatus string `json:"exitstatus"`
-		}
-		if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/tasks/%s/status", url.PathEscape(node), url.PathEscape(upid)), nil, &status); err != nil {
-			return err
-		}
-		if status.Status == "stopped" {
-			if status.ExitStatus == "" || status.ExitStatus == "OK" {
-				return nil
-			}
-			return fmt.Errorf("pve task failed: %s", status.ExitStatus)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout waiting for task %s", upid)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
 	}
-}
-
-type APIError struct {
-	StatusCode int
-	Message    string
-}
-
-func (e APIError) Error() string {
-	return fmt.Sprintf("pve api status %d: %s", e.StatusCode, e.Message)
-}
-
-type envelope struct {
-	Data   json.RawMessage `json:"data"`
-	Errors any             `json:"errors,omitempty"`
+	_ = node
+	return waitProxmoxTask(ctx, proxmox.NewTask(proxmox.UPID(upid), client), timeout)
 }
 
 func (c *Client) request(ctx context.Context, clusterKey, method, path string, params url.Values, out any) error {
-	token, ok := c.tokens[clusterKey]
-	if !ok {
-		return fmt.Errorf("unknown cluster %s", clusterKey)
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
 	}
-	base := token.Site
-	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
-		base = "https://" + base
-	}
-	endpoint := strings.TrimRight(base, "/") + "/api2/json" + path
-	var body io.Reader
-	if method == http.MethodGet || method == http.MethodDelete {
+	switch method {
+	case http.MethodGet:
 		if len(params) > 0 {
-			endpoint += "?" + params.Encode()
+			return client.GetWithParams(ctx, path, valuesToMap(params), out)
 		}
-	} else if len(params) > 0 {
-		body = bytes.NewBufferString(params.Encode())
+		return client.Get(ctx, path, out)
+	case http.MethodPost:
+		return client.Post(ctx, path, valuesToMap(params), out)
+	case http.MethodPut:
+		return client.Put(ctx, path, valuesToMap(params), out)
+	case http.MethodDelete:
+		if len(params) > 0 {
+			path += "?" + params.Encode()
+		}
+		return client.Delete(ctx, path, out)
+	default:
+		return fmt.Errorf("unsupported proxmox method %s", method)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", authHeader(token.Token))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return APIError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(string(respBody))}
-	}
-	if out == nil {
-		return nil
-	}
-	var env envelope
-	if err := json.Unmarshal(respBody, &env); err != nil {
-		return err
-	}
-	if len(env.Data) == 0 || string(env.Data) == "null" {
-		return nil
-	}
-	return json.Unmarshal(env.Data, out)
-}
-
-func authHeader(token string) string {
-	if strings.HasPrefix(token, "PVEAPIToken=") {
-		return token
-	}
-	return "PVEAPIToken=" + token
 }
 
 func truthy(v any) bool {
@@ -526,10 +518,66 @@ func truthy(v any) bool {
 	}
 }
 
-func taskNodeFromUPID(upid, fallback string) string {
-	parts := strings.Split(upid, ":")
-	if len(parts) > 1 && parts[1] != "" {
-		return parts[1]
+func (c *Client) clusterClient(clusterKey string) (*proxmox.Client, error) {
+	client, ok := c.clients[clusterKey]
+	if !ok {
+		return nil, fmt.Errorf("unknown cluster %s", clusterKey)
 	}
-	return fallback
+	return client, nil
+}
+
+func proxmoxBaseURL(site string) string {
+	base := strings.TrimRight(site, "/")
+	if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "https://" + base
+	}
+	if !strings.HasSuffix(base, "/api2/json") {
+		base += "/api2/json"
+	}
+	return base
+}
+
+func splitAPIToken(token string) (string, string) {
+	token = strings.TrimPrefix(token, "PVEAPIToken=")
+	parts := strings.SplitN(token, "=", 2)
+	if len(parts) != 2 {
+		return token, ""
+	}
+	return parts[0], parts[1]
+}
+
+func valuesToMap(values url.Values) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, items := range values {
+		out[key] = strings.Join(items, ",")
+	}
+	return out
+}
+
+func waitProxmoxTask(ctx context.Context, task *proxmox.Task, timeout time.Duration) error {
+	if task == nil {
+		return nil
+	}
+	err := task.Wait(ctx, 2*time.Second, timeout)
+	if err != nil {
+		return err
+	}
+	if task.IsFailed {
+		return fmt.Errorf("pve task failed: %s", task.ExitStatus)
+	}
+	return nil
+}
+
+func isNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if proxmox.IsNotFound(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "404") || strings.Contains(msg, "not found") || strings.Contains(msg, "does not exist")
 }
