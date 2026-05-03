@@ -726,6 +726,12 @@ function displayClusterName(key?: string): string {
   return getCluster(key)?.name || key || '-'
 }
 
+function displayCPUName(clusterKey?: string, cpuKey?: string): string {
+  const cluster = getCluster(clusterKey)
+  const cpu = cluster?.cpu.find((item) => item.key === cpuKey)
+  return cpu?.name || cpuKey || '-'
+}
+
 function displayVmName(vm: VM): string {
   const prefix = `${vm.owner_username}-`
   return vm.vmname.startsWith(prefix) ? vm.vmname.slice(prefix.length) : vm.vmname
@@ -2007,6 +2013,13 @@ function renderDetail(vm: VM) {
   const passwordBlock = vm.password
     ? `<div class="detail-block"><h4>Login Password</h4><div class="mono password-value">${escapeHtml(vm.password)}</div></div>`
     : ''
+  const cpuKey = configString(vm.config, 'cpu_key')
+  const storageKey = configString(vm.config, 'storage_key')
+  const bridgeKey = configString(vm.config, 'bridge_key')
+  const bootOrder = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
+  const cpuCores = configNumber(vm.config, 'cpu_cores', 0)
+  const memoryGB = configNumber(vm.config, 'memory_gb', 0)
+  const diskGB = configNumber(vm.config, 'disk_gb', 0)
   els.detailPageContent.innerHTML = `
     <div class="detail-grid">
       <div><span class="label">Name</span><div>${scrollText(displayVmName(vm), 'strong')}</div></div>
@@ -2015,8 +2028,17 @@ function renderDetail(vm: VM) {
       <div><span class="label">Node</span><div>${scrollText(vm.node ?? 'auto')}</div></div>
       <div><span class="label">VMID</span><div>${vm.vmid}</div></div>
       <div><span class="label">IP</span><div class="mono">${scrollText(vm.ip, 'mono')}</div></div>
+      <div><span class="label">CPU Type</span><div>${scrollText(displayCPUName(vm.cluster_key, cpuKey))}</div></div>
+      <div><span class="label">CPU Cores</span><div>${cpuCores || '-'}</div></div>
+      <div><span class="label">Memory</span><div>${memoryGB ? `${memoryGB} GB` : '-'}</div></div>
+      <div><span class="label">Storage</span><div>${scrollText(storageKey)}</div></div>
+      <div><span class="label">Disk</span><div>${diskGB ? `${diskGB} GB` : '-'}</div></div>
+      <div><span class="label">Bridge</span><div>${scrollText(bridgeKey)}</div></div>
+      <div><span class="label">Boot Order</span><div>${scrollText(bootOrder)}</div></div>
       <div><span class="label">Security Group</span><div>${scrollText(vm.security_group_name)}</div></div>
-      <div><span class="label">Boot Order</span><div>${scrollText(configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0')))}</div></div>
+      <div><span class="label">SSH Keys</span><div>${scrollText(vm.sshkeys.length ? `${vm.sshkeys.length} item(s)` : '-', 'mono')}</div></div>
+      <div><span class="label">Shared Users</span><div>${scrollText(vm.shared_usernames.length ? vm.shared_usernames.join(', ') : '-', 'mono')}</div></div>
+      <div><span class="label">UESTC</span><div>${vm.uestc_restricted ? 'force' : 'choose'}</div></div>
       <div><span class="label">Sync State</span><div>${statusBadge(vm.sync_state)}</div></div>
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
       <div><span class="label">任务队列</span><div>${vm.task_queue_paused ? '<span class="badge warn">已暂停</span>' : '<span class="badge ok">运行中</span>'}</div></div>
