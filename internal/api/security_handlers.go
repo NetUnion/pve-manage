@@ -37,8 +37,9 @@ func (s *Server) handleListSecurityGroups(w http.ResponseWriter, r *http.Request
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
 		FROM security_groups
+		WHERE owner_username = ?
 		ORDER BY owner_username, name
-	`)
+	`, current.Username)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -56,9 +57,7 @@ func (s *Server) handleListSecurityGroups(w http.ResponseWriter, r *http.Request
 		item.PolicyIn = normalizeFirewallPolicyDisplay(item.PolicyIn)
 		item.PolicyOut = normalizeFirewallPolicyDisplay(item.PolicyOut)
 		item.Rules = rawJSONFromString(rulesRaw)
-		if current.IsAdmin || current.Username == item.OwnerUsername {
-			items = append(items, item)
-		}
+		items = append(items, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
