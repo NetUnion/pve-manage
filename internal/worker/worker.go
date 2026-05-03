@@ -693,7 +693,7 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 	if stringFromMap(cfg, "ipconfig0", "") != fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway) {
 		params.Set("ipconfig0", fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway))
 	}
-	if desiredBoot, err := normalizeBootOrder(stringFrom(prefer, "boot_order", "")); err == nil && desiredBoot != "" {
+	if desiredBoot := normalizeBootOrder(stringFrom(prefer, "boot_order", "")); desiredBoot != "" {
 		if stringFromMap(cfg, "boot", "") != desiredBoot {
 			params.Set("boot", desiredBoot)
 		}
