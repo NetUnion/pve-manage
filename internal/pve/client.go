@@ -354,11 +354,16 @@ func (c *Client) EnsureFirewall(ctx context.Context, clusterKey, node string, vm
 		return err
 	}
 	if err := c.request(ctx, clusterKey, http.MethodPut, fmt.Sprintf("/nodes/%s/qemu/%d/firewall/options", url.PathEscape(node), vmid), url.Values{
-		"enable":    {"1"},
-		"ipfilter":  {"1"},
-		"dhcp":      {"0"},
-		"ndp":       {"1"},
-		"policy_in": {"ACCEPT"},
+		"enable":        {"1"},
+		"dhcp":          {"0"},
+		"ndp":           {"1"},
+		"radv":          {"0"},
+		"macfilter":     {"1"},
+		"ipfilter":      {"1"},
+		"log_level_in":  {"nolog"},
+		"log_level_out": {"nolog"},
+		"policy_in":     {pvePolicy(spec.PolicyIn)},
+		"policy_out":    {pvePolicy(spec.PolicyOut)},
 	}, nil); err != nil {
 		return err
 	}

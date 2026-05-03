@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS security_groups (
     owner_username TEXT NOT NULL,
     name TEXT NOT NULL,
     rules_json TEXT NOT NULL,
+    policy_in TEXT NOT NULL DEFAULT 'ACCEPT',
+    policy_out TEXT NOT NULL DEFAULT 'ACCEPT',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE(owner_username, name)
@@ -179,6 +181,14 @@ CREATE TABLE IF NOT EXISTS node_metrics (
 
 CREATE INDEX IF NOT EXISTS idx_node_metrics_cluster_node_recorded
     ON node_metrics(cluster_key, node, recorded_at);
+`,
+	},
+	{
+		Version: 6,
+		Name:    "security_group_policy_columns",
+		SQL: `
+ALTER TABLE security_groups ADD COLUMN policy_in TEXT NOT NULL DEFAULT 'ACCEPT';
+ALTER TABLE security_groups ADD COLUMN policy_out TEXT NOT NULL DEFAULT 'ACCEPT';
 `,
 	},
 }

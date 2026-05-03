@@ -46,6 +46,8 @@ type SecurityGroup struct {
 	OwnerUsername string
 	Name          string
 	RulesJSON     string
+	PolicyIn      string
+	PolicyOut     string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }

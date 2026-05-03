@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -21,8 +22,10 @@ type securityGroupRule struct {
 }
 
 type securityGroupRequest struct {
-	Name  string              `json:"name"`
-	Rules []securityGroupRule `json:"rules"`
+	Name      string              `json:"name"`
+	PolicyIn  string              `json:"policy_in"`
+	PolicyOut string              `json:"policy_out"`
+	Rules     []securityGroupRule `json:"rules"`
 }
 
 func (s *Server) handleListSecurityGroups(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +35,7 @@ func (s *Server) handleListSecurityGroups(w http.ResponseWriter, r *http.Request
 		return
 	}
 	rows, err := s.db.QueryContext(r.Context(), `
-		SELECT id, owner_username, name, rules_json, created_at, updated_at
+		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
 		FROM security_groups
 		ORDER BY owner_username, name
 	`)
@@ -46,10 +49,12 @@ func (s *Server) handleListSecurityGroups(w http.ResponseWriter, r *http.Request
 	for rows.Next() {
 		var item securityGroupSummary
 		var rulesRaw string
-		if err := rows.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.PolicyIn, &item.PolicyOut, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			s.jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		item.PolicyIn = normalizeFirewallPolicyDisplay(item.PolicyIn)
+		item.PolicyOut = normalizeFirewallPolicyDisplay(item.PolicyOut)
 		item.Rules = rawJSONFromString(rulesRaw)
 		if current.IsAdmin || current.Username == item.OwnerUsername {
 			items = append(items, item)
@@ -66,13 +71,13 @@ func (s *Server) handleGetSecurityGroup(w http.ResponseWriter, r *http.Request) 
 	}
 	name := chi.URLParam(r, "name")
 	row := s.db.QueryRowContext(r.Context(), `
-		SELECT id, owner_username, name, rules_json, created_at, updated_at
+		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
 		FROM security_groups
 		WHERE owner_username = ? AND name = ?
 	`, current.Username, name)
 	var item securityGroupSummary
 	var rulesRaw string
-	if err := row.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.PolicyIn, &item.PolicyOut, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			s.jsonError(w, http.StatusNotFound, "security group not found")
 			return
@@ -80,6 +85,8 @@ func (s *Server) handleGetSecurityGroup(w http.ResponseWriter, r *http.Request) 
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	item.PolicyIn = normalizeFirewallPolicyDisplay(item.PolicyIn)
+	item.PolicyOut = normalizeFirewallPolicyDisplay(item.PolicyOut)
 	item.Rules = rawJSONFromString(rulesRaw)
 	writeJSON(w, http.StatusOK, item)
 }
@@ -118,11 +125,16 @@ func (s *Server) handleCreateSecurityGroup(w http.ResponseWriter, r *http.Reques
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	policyIn, policyOut, err := normalizeFirewallPolicies(req.PolicyIn, req.PolicyOut)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	now := timestamp()
 	if _, err := s.db.ExecContext(r.Context(), `
-		INSERT INTO security_groups(owner_username, name, rules_json, created_at, updated_at)
-		VALUES(?,?,?,?,?)
-	`, current.Username, req.Name, rulesJSON, now, now); err != nil {
+		INSERT INTO security_groups(owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?)
+	`, current.Username, req.Name, rulesJSON, policyIn, policyOut, now, now); err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -150,6 +162,11 @@ func (s *Server) handlePatchSecurityGroup(w http.ResponseWriter, r *http.Request
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	policyIn, policyOut, err := normalizeFirewallPolicies(req.PolicyIn, req.PolicyOut)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	now := timestamp()
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -160,9 +177,9 @@ func (s *Server) handlePatchSecurityGroup(w http.ResponseWriter, r *http.Request
 
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE security_groups
-		SET rules_json = ?, updated_at = ?
+		SET rules_json = ?, policy_in = ?, policy_out = ?, updated_at = ?
 		WHERE owner_username = ? AND name = ?
-	`, rulesJSON, now, current.Username, name)
+	`, rulesJSON, policyIn, policyOut, now, current.Username, name)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -238,7 +255,7 @@ func normalizeSecurityGroupRules(rules []securityGroupRule) (string, error) {
 			return "", fmt.Errorf("invalid direction %q", rule.Direction)
 		}
 		switch rule.Action {
-		case "allow", "deny":
+		case "accept", "drop":
 		default:
 			return "", fmt.Errorf("invalid action %q", rule.Action)
 		}
@@ -272,6 +289,7 @@ func normalizeSecurityGroupRules(rules []securityGroupRule) (string, error) {
 				return "", errors.New("port_start must not exceed port_end")
 			}
 		}
+		rule.Action = normalizeFirewallAction(rule.Action)
 		normalized = append(normalized, rule)
 	}
 	data, err := json.Marshal(normalized)
@@ -279,6 +297,55 @@ func normalizeSecurityGroupRules(rules []securityGroupRule) (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+func normalizeFirewallPolicies(policyIn, policyOut string) (string, string, error) {
+	in := normalizeFirewallPolicyInput(policyIn)
+	out := normalizeFirewallPolicyInput(policyOut)
+	switch in {
+	case "ACCEPT", "DROP":
+	default:
+		return "", "", fmt.Errorf("invalid policy_in %q", policyIn)
+	}
+	switch out {
+	case "ACCEPT", "DROP":
+	default:
+		return "", "", fmt.Errorf("invalid policy_out %q", policyOut)
+	}
+	return in, out, nil
+}
+
+func normalizeFirewallAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "accept":
+		return "accept"
+	case "drop":
+		return "drop"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func normalizeFirewallPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", "accept":
+		return "ACCEPT"
+	case "drop":
+		return "DROP"
+	default:
+		return strings.ToUpper(strings.TrimSpace(policy))
+	}
+}
+
+func normalizeFirewallPolicyInput(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "", "ACCEPT":
+		return "ACCEPT"
+	case "DROP":
+		return "DROP"
+	default:
+		return strings.ToUpper(strings.TrimSpace(value))
+	}
 }
 
 func intPtr(v int) *int { return &v }

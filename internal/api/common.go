@@ -69,6 +69,8 @@ type securityGroupSummary struct {
 	OwnerUsername string          `json:"owner_username"`
 	Name          string          `json:"name"`
 	Rules         json.RawMessage `json:"rules"`
+	PolicyIn      string          `json:"policy_in"`
+	PolicyOut     string          `json:"policy_out"`
 	CreatedAt     string          `json:"created_at"`
 	UpdatedAt     string          `json:"updated_at"`
 }
@@ -138,6 +140,17 @@ func rawJSONFromString(raw string) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return json.RawMessage(raw)
+}
+
+func normalizeFirewallPolicyDisplay(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "drop":
+		return "drop"
+	case "accept":
+		return "accept"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
 }
 
 func normalizeStringList(values []string) []string {
@@ -586,16 +599,18 @@ func (s *Server) visibleVM(ctx context.Context, id int64, user *model.User) (*vm
 
 func (s *Server) loadSecurityGroupRow(ctx context.Context, owner, name string) (*securityGroupSummary, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, owner_username, name, rules_json, created_at, updated_at
+		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
 		FROM security_groups
 		WHERE owner_username = ? AND name = ?
 	`, owner, name)
 
 	var item securityGroupSummary
 	var rulesRaw string
-	if err := row.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.PolicyIn, &item.PolicyOut, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return nil, err
 	}
+	item.PolicyIn = normalizeFirewallPolicyDisplay(item.PolicyIn)
+	item.PolicyOut = normalizeFirewallPolicyDisplay(item.PolicyOut)
 	item.Rules = rawJSONFromString(rulesRaw)
 	return &item, nil
 }

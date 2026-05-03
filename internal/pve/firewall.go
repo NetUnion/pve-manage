@@ -11,6 +11,8 @@ import (
 
 type FirewallSpec struct {
 	UserGroupName string
+	PolicyIn      string
+	PolicyOut     string
 	Rules         []SecurityRule
 	IPFilter      []string
 	Groups        []string
@@ -218,12 +220,23 @@ func (c *Client) clearFirewallRules(ctx context.Context, clusterKey, basePath st
 
 func pveAction(action string) string {
 	switch action {
-	case "allow":
+	case "accept":
 		return "ACCEPT"
-	case "deny":
+	case "drop":
 		return "DROP"
 	default:
 		return action
+	}
+}
+
+func pvePolicy(policy string) string {
+	switch policy {
+	case "", "accept":
+		return "ACCEPT"
+	case "drop":
+		return "DROP"
+	default:
+		return strings.ToUpper(policy)
 	}
 }
 

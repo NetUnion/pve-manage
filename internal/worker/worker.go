@@ -61,6 +61,12 @@ type securityRule struct {
 	PortEnd   *int   `json:"port_end"`
 }
 
+type securityGroupConfig struct {
+	PolicyIn  string
+	PolicyOut string
+	Rules     []securityRule
+}
+
 type templateRecord struct {
 	ClusterKey   string
 	TemplateVMID int
@@ -529,7 +535,7 @@ func (w *Worker) resizeDisk(ctx context.Context, vm vmRow, prefer map[string]any
 }
 
 func (w *Worker) syncFirewall(ctx context.Context, vm vmRow, prefer map[string]any, bridge config.BridgeConfig, node string) error {
-	rules, err := w.loadSecurityRules(ctx, vm.OwnerUsername, vm.SecurityGroupName)
+	sg, err := w.loadSecurityGroupConfig(ctx, vm.OwnerUsername, vm.SecurityGroupName)
 	if err != nil {
 		return err
 	}
@@ -539,9 +545,11 @@ func (w *Worker) syncFirewall(ctx context.Context, vm vmRow, prefer map[string]a
 	}
 	ipfilter := append([]string{exactIPv4CIDR(vm.IP)}, bridge.IPFilter...)
 	spec := pve.FirewallSpec{
-		Rules:    convertRules(rules),
-		IPFilter: ipfilter,
-		Groups:   groups,
+		PolicyIn:  sg.PolicyIn,
+		PolicyOut: sg.PolicyOut,
+		Rules:     convertRules(sg.Rules),
+		IPFilter:  ipfilter,
+		Groups:    groups,
 	}
 	return w.pve.EnsureFirewall(ctx, vm.ClusterKey, node, vm.VMID, spec)
 }
@@ -849,20 +857,24 @@ func scoreNodeLoad(load nodeLoad, status pve.NodeStatus, requestedCores, request
 	return score, cpuScore, memScore
 }
 
-func (w *Worker) loadSecurityRules(ctx context.Context, owner, name string) ([]securityRule, error) {
-	var raw string
+func (w *Worker) loadSecurityGroupConfig(ctx context.Context, owner, name string) (securityGroupConfig, error) {
+	var raw, policyIn, policyOut string
 	if err := w.db.QueryRowContext(ctx, `
-		SELECT rules_json
+		SELECT rules_json, policy_in, policy_out
 		FROM security_groups
 		WHERE owner_username = ? AND name = ?
-	`, owner, name).Scan(&raw); err != nil {
-		return nil, err
+	`, owner, name).Scan(&raw, &policyIn, &policyOut); err != nil {
+		return securityGroupConfig{}, err
 	}
 	var rules []securityRule
 	if err := json.Unmarshal([]byte(raw), &rules); err != nil {
-		return nil, err
+		return securityGroupConfig{}, err
 	}
-	return rules, nil
+	return securityGroupConfig{
+		PolicyIn:  normalizeFirewallPolicy(policyIn),
+		PolicyOut: normalizeFirewallPolicy(policyOut),
+		Rules:     rules,
+	}, nil
 }
 
 func (w *Worker) upsertTemplate(ctx context.Context, tpl templateRecord, now string) error {
@@ -1018,7 +1030,7 @@ func convertRules(rules []securityRule) []pve.SecurityRule {
 	for _, rule := range rules {
 		out = append(out, pve.SecurityRule{
 			Direction: rule.Direction,
-			Action:    rule.Action,
+			Action:    normalizeFirewallAction(rule.Action),
 			Ethertype: rule.Ethertype,
 			Protocol:  rule.Protocol,
 			CIDR:      rule.CIDR,
@@ -1027,6 +1039,28 @@ func convertRules(rules []securityRule) []pve.SecurityRule {
 		})
 	}
 	return out
+}
+
+func normalizeFirewallAction(action string) string {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "accept":
+		return "accept"
+	case "drop":
+		return "drop"
+	default:
+		return strings.ToLower(strings.TrimSpace(action))
+	}
+}
+
+func normalizeFirewallPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", "accept":
+		return "ACCEPT"
+	case "drop":
+		return "DROP"
+	default:
+		return strings.ToUpper(strings.TrimSpace(policy))
+	}
 }
 
 func stringFrom(obj map[string]any, key, fallback string) string {

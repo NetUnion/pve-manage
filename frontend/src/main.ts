@@ -77,6 +77,8 @@ type SecurityGroup = {
   id: number
   owner_username: string
   name: string
+  policy_in: string
+  policy_out: string
   rules: Rule[]
   created_at: string
   updated_at: string
@@ -93,7 +95,7 @@ type SSHKey = {
 
 type Rule = {
   direction: 'in' | 'out'
-  action: 'allow' | 'deny'
+  action: 'accept' | 'drop'
   ethertype: 'ipv4' | 'ipv6'
   protocol: 'tcp' | 'udp' | 'icmp'
   cidr: string
@@ -139,6 +141,8 @@ const state = {
   sgDialogMode: 'create' as 'create' | 'edit',
   sgDialogGroup: null as SecurityGroup | null,
   sgRules: [] as Rule[],
+  sgPolicyIn: 'accept' as 'accept' | 'drop',
+  sgPolicyOut: 'accept' as 'accept' | 'drop',
   sshDialogMode: 'create' as 'create' | 'edit',
   sshDialogKey: null as SSHKey | null,
 }
@@ -337,6 +341,16 @@ app.innerHTML = `
       </div>
       <input type="hidden" id="sg-mode" value="create" />
       <label>Name<input id="sg-name" class="input" /></label>
+      <div class="form-grid compact">
+        <label>Input Policy<select id="sg-policy-in" class="input">
+          <option value="accept">accept</option>
+          <option value="drop">drop</option>
+        </select></label>
+        <label>Output Policy<select id="sg-policy-out" class="input">
+          <option value="accept">accept</option>
+          <option value="drop">drop</option>
+        </select></label>
+      </div>
       <div class="rule-head">
         <h4>Rules</h4>
         <button type="button" id="add-rule-btn" class="btn btn-ghost">Add Rule</button>
@@ -451,6 +465,8 @@ const els = {
   sshTable: $('#ssh-table'),
   sgMode: $('#sg-mode') as HTMLInputElement,
   sgName: $('#sg-name') as HTMLInputElement,
+  sgPolicyIn: $('#sg-policy-in') as HTMLSelectElement,
+  sgPolicyOut: $('#sg-policy-out') as HTMLSelectElement,
   ruleRows: $('#rule-rows'),
   addRuleBtn: $('#add-rule-btn'),
   detailContent: $('#detail-content'),
@@ -718,7 +734,7 @@ function renderSecurityGroups() {
   els.sgTable.innerHTML = `
     <table>
       <thead>
-        <tr><th>Name</th><th>Rules</th><th>Updated</th><th></th></tr>
+        <tr><th>Name</th><th>Input</th><th>Output</th><th>Rules</th><th>Updated</th><th></th></tr>
       </thead>
       <tbody>
         ${groups
@@ -726,6 +742,8 @@ function renderSecurityGroups() {
             (sg) => `
               <tr data-sg-name="${escapeHtml(sg.name)}">
                 <td class="strong">${escapeHtml(sg.name)}</td>
+                <td>${escapeHtml(normalizeSgPolicy(sg.policy_in))}</td>
+                <td>${escapeHtml(normalizeSgPolicy(sg.policy_out))}</td>
                 <td>${sg.rules.length}</td>
                 <td>${escapeHtml(formatTime(sg.updated_at))}</td>
                 <td>
@@ -1066,7 +1084,7 @@ function openVmDialog(mode: 'create' | 'edit', vm?: VM) {
 
 function addRuleRow(rule: Rule = {
   direction: 'in',
-  action: 'allow',
+  action: 'accept',
   ethertype: 'ipv4',
   protocol: 'tcp',
   cidr: '0.0.0.0/0',
@@ -1086,8 +1104,8 @@ function renderRuleRows() {
           <option value="out" ${rule.direction === 'out' ? 'selected' : ''}>out</option>
         </select>
         <select class="input" data-field="action">
-          <option value="allow" ${rule.action === 'allow' ? 'selected' : ''}>allow</option>
-          <option value="deny" ${rule.action === 'deny' ? 'selected' : ''}>deny</option>
+          <option value="accept" ${rule.action === 'accept' ? 'selected' : ''}>accept</option>
+          <option value="drop" ${rule.action === 'drop' ? 'selected' : ''}>drop</option>
         </select>
         <select class="input" data-field="ethertype">
           <option value="ipv4" ${rule.ethertype === 'ipv4' ? 'selected' : ''}>ipv4</option>
@@ -1111,17 +1129,25 @@ function resetSgDialog() {
   state.sgDialogMode = 'create'
   state.sgDialogGroup = null
   state.sgRules = []
+  state.sgPolicyIn = 'accept'
+  state.sgPolicyOut = 'accept'
   els.sgDialogTitle.textContent = '新建 Security Group'
   els.sgName.value = ''
+  els.sgPolicyIn.value = state.sgPolicyIn
+  els.sgPolicyOut.value = state.sgPolicyOut
   renderRuleRows()
 }
 
 function fillSgDialog(group: SecurityGroup) {
   state.sgDialogMode = 'edit'
   state.sgDialogGroup = group
-  state.sgRules = group.rules.length ? JSON.parse(JSON.stringify(group.rules)) : []
+  state.sgRules = group.rules.length ? JSON.parse(JSON.stringify(group.rules)).map(normalizeRule) : []
+  state.sgPolicyIn = normalizeSgPolicy(group.policy_in) as 'accept' | 'drop'
+  state.sgPolicyOut = normalizeSgPolicy(group.policy_out) as 'accept' | 'drop'
   els.sgDialogTitle.textContent = `编辑 ${group.name}`
   els.sgName.value = group.name
+  els.sgPolicyIn.value = state.sgPolicyIn
+  els.sgPolicyOut.value = state.sgPolicyOut
   renderRuleRows()
 }
 
@@ -1374,7 +1400,7 @@ function serializeRules(): Rule[] {
     }
     return {
       direction: field('direction') as 'in' | 'out',
-      action: field('action') as 'allow' | 'deny',
+      action: field('action') as 'accept' | 'drop',
       ethertype: field('ethertype') as 'ipv4' | 'ipv6',
       protocol: field('protocol') as 'tcp' | 'udp' | 'icmp',
       cidr: field('cidr'),
@@ -1384,11 +1410,27 @@ function serializeRules(): Rule[] {
   })
 }
 
+function normalizeRule(rule: Rule): Rule {
+  return {
+    ...rule,
+    action: normalizeRuleAction(rule.action),
+    direction: rule.direction === 'out' ? 'out' : 'in',
+    ethertype: rule.ethertype === 'ipv6' ? 'ipv6' : 'ipv4',
+    protocol: rule.protocol === 'udp' ? 'udp' : rule.protocol === 'icmp' ? 'icmp' : 'tcp',
+  }
+}
+
+function normalizeRuleAction(value: string): 'accept' | 'drop' {
+  return value.trim().toLowerCase() === 'drop' ? 'drop' : 'accept'
+}
+
 async function submitSgForm(event: SubmitEvent) {
   event.preventDefault()
   try {
     const payload = {
       name: els.sgName.value.trim(),
+      policy_in: normalizeSgPolicy(els.sgPolicyIn.value),
+      policy_out: normalizeSgPolicy(els.sgPolicyOut.value),
       rules: serializeRules(),
     }
     if (state.sgDialogMode === 'create') {
@@ -1712,3 +1754,13 @@ async function init() {
 init().catch((err) => {
   flash((err as Error).message, 'error')
 })
+
+function normalizeSgPolicy(value: string): 'accept' | 'drop' {
+  switch (value.trim().toLowerCase()) {
+    case 'drop':
+      return 'drop'
+    case 'accept':
+    default:
+      return 'accept'
+  }
+}
