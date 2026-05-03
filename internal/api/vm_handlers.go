@@ -17,6 +17,7 @@ import (
 type createVMRequest struct {
 	ClusterKey        string   `json:"cluster_key"`
 	VMName            string   `json:"vmname"`
+	Password          *string  `json:"password"`
 	CPUKey            string   `json:"cpu_key"`
 	CPUCores          int      `json:"cpu_cores"`
 	MemoryGB          int      `json:"memory_gb"`
@@ -34,6 +35,7 @@ type createVMRequest struct {
 
 type patchVMRequest struct {
 	VMName            *string   `json:"vmname"`
+	Password          *string   `json:"password"`
 	CPUKey            *string   `json:"cpu_key"`
 	CPUCores          *int      `json:"cpu_cores"`
 	MemoryGB          *int      `json:"memory_gb"`
@@ -56,7 +58,8 @@ type createVMResponse struct {
 
 type vmDetailResponse struct {
 	VM
-	Password string `json:"password"`
+	Password string          `json:"password"`
+	Tasks    []vmTaskSummary `json:"tasks"`
 }
 
 type VM struct {
@@ -123,6 +126,11 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusForbidden, "permission denied")
 		return
 	}
+	tasks, err := s.loadVMTasks(r.Context(), vm.ID)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, vmDetailResponse{
 		VM: VM{
 			ID:                 vm.ID,
@@ -149,7 +157,13 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 			DeleteRequestedAt:  vm.DeleteRequestedAt,
 			DeleteExecuteAfter: vm.DeleteExecuteAfter,
 		},
-		Password: vm.Password,
+		Password: func() string {
+			if current.Username == vm.OwnerUsername {
+				return vm.Password
+			}
+			return ""
+		}(),
+		Tasks: tasks,
 	})
 }
 
@@ -187,6 +201,11 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	if req.Power != "running" && req.Power != "stopped" {
 		s.jsonError(w, http.StatusBadRequest, "power must be running or stopped")
 		return
+	}
+	if req.Password != nil {
+		if strings.TrimSpace(*req.Password) == "" {
+			req.Password = nil
+		}
 	}
 	if len(req.SSHKeys) == 0 {
 		req.SSHKeys = []string{}
@@ -378,6 +397,9 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		"last_synced_at": nil,
 	})
 	password := randomPassword(20)
+	if req.Password != nil {
+		password = strings.TrimSpace(*req.Password)
+	}
 	now := timestamp()
 	sshkeysJSON := mustJSON(req.SSHKeys)
 	sharedJSON := mustJSON(req.SharedUsernames)
@@ -400,6 +422,10 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := queueVMTaskConn(r.Context(), conn, id, "provision", map[string]any{"vm_id": id}); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -485,7 +511,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	}
 	sharedOnly := current.Username != vm.OwnerUsername && !current.IsAdmin
 	if sharedOnly {
-		if req.VMName != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SSHKeyIDs != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
+		if req.VMName != nil || req.Password != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SSHKeyIDs != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
 			s.jsonError(w, http.StatusForbidden, "shared users can only change power")
 			return
 		}
@@ -498,6 +524,9 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	prefer := map[string]any{}
 	_ = json.Unmarshal(vm.PreferStatus, &prefer)
 	changed := false
+	rebootNeeded := false
+	currentPower := vmPowerFromRaw(vm.RealStatus)
+	pendingPower := currentPower
 
 	if req.VMName != nil {
 		name := strings.TrimSpace(*req.VMName)
@@ -507,6 +536,16 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		}
 		vm.VMName = prefixedVMName(vm.OwnerUsername, name)
 		prefer["vmname"] = vm.VMName
+		changed = true
+	}
+	if req.Password != nil {
+		password := strings.TrimSpace(*req.Password)
+		if password == "" {
+			s.jsonError(w, http.StatusBadRequest, "password is required")
+			return
+		}
+		vm.Password = password
+		rebootNeeded = true
 		changed = true
 	}
 	if (req.SSHKeys != nil || req.SSHKeyIDs != nil) && !sharedOnly {
@@ -575,6 +614,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		prefer["power"] = *req.Power
+		pendingPower = *req.Power
 		changed = true
 	}
 	if req.CPUKey != nil || req.StorageKey != nil || req.BridgeKey != nil || req.TemplateVMID != nil || req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil {
@@ -594,6 +634,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			}
 			cfg["cpu_key"] = *req.CPUKey
 			prefer["cpu_key"] = *req.CPUKey
+			rebootNeeded = true
 		}
 		if req.StorageKey != nil {
 			if _, ok := cluster.StorageByKey(*req.StorageKey); !ok {
@@ -602,6 +643,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			}
 			cfg["storage_key"] = *req.StorageKey
 			prefer["storage_key"] = *req.StorageKey
+			rebootNeeded = true
 		}
 		if req.BridgeKey != nil {
 			bridge, ok := cluster.BridgeByKey(*req.BridgeKey)
@@ -613,6 +655,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			cfg["gateway"] = bridge.IPv4.Gateway
 			prefer["bridge_key"] = *req.BridgeKey
 			prefer["gateway"] = bridge.IPv4.Gateway
+			rebootNeeded = true
 		}
 		if req.TemplateVMID != nil {
 			if _, err := s.loadTemplateRow(r.Context(), vm.ClusterKey, *req.TemplateVMID); err != nil {
@@ -621,18 +664,22 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			}
 			cfg["template_vmid"] = *req.TemplateVMID
 			prefer["template_vmid"] = *req.TemplateVMID
+			rebootNeeded = true
 		}
 		if req.CPUCores != nil {
 			cfg["cpu_cores"] = *req.CPUCores
 			prefer["cpu_cores"] = *req.CPUCores
+			rebootNeeded = true
 		}
 		if req.MemoryGB != nil {
 			cfg["memory_gb"] = *req.MemoryGB
 			prefer["memory_gb"] = *req.MemoryGB
+			rebootNeeded = true
 		}
 		if req.DiskGB != nil {
 			cfg["disk_gb"] = *req.DiskGB
 			prefer["disk_gb"] = *req.DiskGB
+			rebootNeeded = true
 		}
 		changed = true
 	}
@@ -716,11 +763,11 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET vmname = ?, ip = ?, node = COALESCE(node, ?), sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
+		SET vmname = ?, ip = ?, node = COALESCE(node, ?), password = ?, sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
 		    uestc_restricted = ?, config_json = ?, prefer_status_json = ?, sync_state = 'pending',
 		    sync_error = NULL, version = version + 1, updated_at = ?
 		WHERE id = ?
-	`, vm.VMName, vm.IP, vm.Node, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), string(cfgBytes), string(preferBytes), now, vm.ID)
+	`, vm.VMName, vm.IP, vm.Node, vm.Password, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), string(cfgBytes), string(preferBytes), now, vm.ID)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -730,6 +777,16 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusNotFound, "vm not found")
 		return
 	}
+	if err := queueVMTaskTx(r.Context(), tx, vm.ID, "apply", map[string]any{"vm_id": vm.ID}); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rebootNeeded && currentPower == "running" && pendingPower != "stopped" && pendingPower != "reboot" {
+		if err := queueVMTaskTx(r.Context(), tx, vm.ID, "reboot", map[string]any{"vm_id": vm.ID, "reason": "config_change"}); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -738,6 +795,9 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if current.Username != vm.OwnerUsername {
+		vm.Password = ""
 	}
 	writeJSON(w, http.StatusOK, vm)
 }
@@ -802,6 +862,10 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 		    delete_requested_at = ?, delete_execute_after = ?, updated_at = ?, version = version + 1
 		WHERE id = ?
 	`, string(preferBytes), nowStr, execStr, nowStr, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := queueVMTaskTx(r.Context(), tx, vm.ID, "delete", map[string]any{"vm_id": vm.ID, "execute_after": execStr}); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -871,6 +935,18 @@ func (s *Server) handleRestoreVM(w http.ResponseWriter, r *http.Request) {
 		    delete_requested_at = NULL, delete_execute_after = NULL, updated_at = ?, version = version + 1
 		WHERE id = ?
 	`, string(preferBytes), nowStr, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vm_tasks
+		SET status = 'canceled', updated_at = ?
+		WHERE vm_id = ? AND kind = 'delete' AND status IN ('pending', 'running')
+	`, nowStr, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := queueVMTaskTx(r.Context(), tx, vm.ID, "apply", map[string]any{"vm_id": vm.ID, "restore": true}); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -945,11 +1021,98 @@ func (s *Server) handleDeleteNowVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := queueVMTaskTx(r.Context(), tx, vm.ID, "delete", map[string]any{"vm_id": vm.ID, "execute_after": nowStr, "immediate": true}); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "delete_execute_after": nowStr})
+}
+
+func (s *Server) handleRetryVMTask(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	vmID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "task_id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid task id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), vmID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !current.IsAdmin && current.Username != vm.OwnerUsername {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot retry tasks")
+		return
+	}
+	task, err := s.loadVMTask(r.Context(), vmID, taskID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if task.Status != "failed" {
+		s.jsonError(w, http.StatusBadRequest, "only failed tasks can be retried")
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := timestamp()
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vm_tasks
+		SET status = 'pending',
+		    error = NULL,
+		    started_at = NULL,
+		    finished_at = NULL,
+		    updated_at = ?
+		WHERE id = ? AND vm_id = ? AND status = 'failed'
+	`, now, taskID, vmID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET sync_state = CASE WHEN delete_requested_at IS NOT NULL THEN 'deleting' ELSE 'pending' END,
+		    sync_error = NULL,
+		    updated_at = ?,
+		    version = version + 1
+		WHERE id = ?
+	`, now, vmID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "requeued": true})
 }
 
 func intFromOrZero(obj map[string]any, key string) int {
@@ -965,4 +1128,21 @@ func intFromOrZero(obj map[string]any, key string) int {
 		return 0
 	}
 	return n
+}
+
+func vmPowerFromRaw(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "unknown"
+	}
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return "unknown"
+	}
+	if power, ok := data["power"].(string); ok && power != "" {
+		return power
+	}
+	if power, ok := data["status"].(string); ok && power != "" {
+		return power
+	}
+	return "unknown"
 }

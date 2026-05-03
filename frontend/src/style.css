@@ -706,6 +706,52 @@ th {
   color: var(--text);
 }
 
+.task-list {
+  display: grid;
+  gap: 10px;
+}
+
+.task-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.task-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.task-meta,
+.task-payload,
+.task-error {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.task-payload,
+.task-error {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.task-error {
+  color: #b91c1c;
+}
+
 @media (max-width: 1200px) {
   .workspace {
     grid-template-columns: 1fr;

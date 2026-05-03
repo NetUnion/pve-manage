@@ -22,11 +22,10 @@ import (
 )
 
 type Worker struct {
-	logger           *slog.Logger
-	db               *sql.DB
-	config           *config.App
-	pve              *pve.Client
-	lastTemplateScan time.Time
+	logger *slog.Logger
+	db     *sql.DB
+	config *config.App
+	pve    *pve.Client
 }
 
 type vmRow struct {
@@ -49,6 +48,26 @@ type vmRow struct {
 	Managed             bool
 	Version             int
 	DeleteExecuteAfter  sql.NullString
+}
+
+type vmTaskRow struct {
+	TaskID      int64
+	VM          vmRow
+	Kind        string
+	PayloadJSON string
+	Status      string
+	Seq         int
+	StartedAt   sql.NullString
+	FinishedAt  sql.NullString
+}
+
+type maintenanceTaskRow struct {
+	TaskID      int64
+	Kind        string
+	PayloadJSON string
+	Status      string
+	StartedAt   sql.NullString
+	FinishedAt  sql.NullString
 }
 
 type securityRule struct {
@@ -112,28 +131,317 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) syncOnce(ctx context.Context) error {
-	if time.Since(w.lastTemplateScan) > time.Minute {
-		if err := w.scanPVE(ctx); err != nil {
-			w.logger.WarnContext(ctx, "pve scan failed", "error", err)
-		} else {
-			w.lastTemplateScan = time.Now()
-		}
+	if err := w.ensureMaintenanceTasks(ctx); err != nil {
+		return err
 	}
 
-	items, err := w.pendingVMs(ctx)
+	maintenanceTasks, err := w.pendingMaintenanceTasks(ctx)
 	if err != nil {
 		return err
 	}
-	for _, item := range items {
-		if err := w.syncVM(ctx, item); err != nil {
-			w.logger.ErrorContext(ctx, "sync vm failed", "id", item.ID, "cluster", item.ClusterKey, "vmid", item.VMID, "error", err)
-			if updateErr := w.markFailed(ctx, item.ID, err.Error()); updateErr != nil {
-				w.logger.ErrorContext(ctx, "update failed vm state", "id", item.ID, "error", updateErr)
+	for _, task := range maintenanceTasks {
+		if err := w.markMaintenanceTaskRunning(ctx, task.TaskID); err != nil {
+			w.logger.ErrorContext(ctx, "update running maintenance task state", "task_id", task.TaskID, "error", err)
+			continue
+		}
+		if err := w.runMaintenanceTask(ctx, task); err != nil {
+			w.logger.ErrorContext(ctx, "run maintenance task failed", "task_id", task.TaskID, "kind", task.Kind, "error", err)
+			if updateErr := w.markMaintenanceTaskFailed(ctx, task.TaskID, err.Error()); updateErr != nil {
+				w.logger.ErrorContext(ctx, "update failed maintenance task state", "task_id", task.TaskID, "error", updateErr)
+			}
+			continue
+		}
+		if err := w.markMaintenanceTaskDone(ctx, task.TaskID); err != nil {
+			w.logger.ErrorContext(ctx, "update done maintenance task state", "task_id", task.TaskID, "error", err)
+		}
+	}
+
+	tasks, err := w.pendingTasks(ctx)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if err := w.markTaskRunning(ctx, task.TaskID); err != nil {
+			w.logger.ErrorContext(ctx, "update running task state", "task_id", task.TaskID, "error", err)
+			continue
+		}
+		if err := w.runTask(ctx, task); err != nil {
+			w.logger.ErrorContext(ctx, "run vm task failed", "task_id", task.TaskID, "vm_id", task.VM.ID, "kind", task.Kind, "error", err)
+			if updateErr := w.markTaskFailed(ctx, task.TaskID, err.Error()); updateErr != nil {
+				w.logger.ErrorContext(ctx, "update failed task state", "task_id", task.TaskID, "error", updateErr)
 			}
 			continue
 		}
 	}
+	if err := w.purgeOldTasks(ctx); err != nil {
+		w.logger.WarnContext(ctx, "purge vm task history failed", "error", err)
+	}
+	if err := w.purgeOldMaintenanceTasks(ctx); err != nil {
+		w.logger.WarnContext(ctx, "purge maintenance task history failed", "error", err)
+	}
 	return nil
+}
+
+func (w *Worker) ensureMaintenanceTasks(ctx context.Context) error {
+	const kind = "inventory_scan"
+	var latestStatus string
+	var finishedAt sql.NullString
+	err := w.db.QueryRowContext(ctx, `
+		SELECT status, finished_at
+		FROM maintenance_tasks
+		WHERE kind = ?
+		ORDER BY id DESC
+		LIMIT 1
+	`, kind).Scan(&latestStatus, &finishedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		if latestStatus == "pending" || latestStatus == "running" {
+			return nil
+		}
+		if finishedAt.Valid {
+			if t, parseErr := parseTime(finishedAt.String); parseErr == nil && time.Since(t) < 10*time.Minute {
+				return nil
+			}
+		}
+	}
+	now := timestamp()
+	_, err = w.db.ExecContext(ctx, `
+		INSERT INTO maintenance_tasks(kind, payload_json, status, created_at, updated_at)
+		VALUES(?, ?, 'pending', ?, ?)
+	`, kind, "{}", now, now)
+	return err
+}
+
+func (w *Worker) pendingMaintenanceTasks(ctx context.Context) ([]maintenanceTaskRow, error) {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT id, kind, payload_json, status, started_at, finished_at
+		FROM maintenance_tasks
+		WHERE status = 'pending'
+		   OR (status = 'failed' AND updated_at <= ?)
+		ORDER BY id
+		LIMIT 10
+	`, time.Now().UTC().Add(-1*time.Minute).Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]maintenanceTaskRow, 0)
+	for rows.Next() {
+		var item maintenanceTaskRow
+		var payload string
+		if err := rows.Scan(&item.TaskID, &item.Kind, &payload, &item.Status, &item.StartedAt, &item.FinishedAt); err != nil {
+			return nil, err
+		}
+		item.PayloadJSON = payload
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (w *Worker) runMaintenanceTask(ctx context.Context, task maintenanceTaskRow) error {
+	switch task.Kind {
+	case "inventory_scan":
+		return w.scanPVE(ctx)
+	default:
+		return fmt.Errorf("unknown maintenance task kind %q", task.Kind)
+	}
+}
+
+func (w *Worker) markMaintenanceTaskRunning(ctx context.Context, taskID int64) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE maintenance_tasks
+		SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
+		WHERE id = ?
+	`, now, now, taskID)
+	return err
+}
+
+func (w *Worker) markMaintenanceTaskDone(ctx context.Context, taskID int64) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE maintenance_tasks
+		SET status = 'done', finished_at = COALESCE(finished_at, ?), updated_at = ?
+		WHERE id = ?
+	`, now, now, taskID)
+	return err
+}
+
+func (w *Worker) markMaintenanceTaskFailed(ctx context.Context, taskID int64, message string) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE maintenance_tasks
+		SET status = 'failed', error = ?, updated_at = ?, finished_at = COALESCE(finished_at, ?)
+		WHERE id = ?
+	`, message, now, now, taskID)
+	return err
+}
+
+func (w *Worker) purgeOldMaintenanceTasks(ctx context.Context) error {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
+	_, err := w.db.ExecContext(ctx, `
+		DELETE FROM maintenance_tasks
+		WHERE status IN ('done', 'failed', 'canceled')
+		  AND finished_at IS NOT NULL
+		  AND finished_at < ?
+	`, cutoff)
+	return err
+}
+
+func (w *Worker) purgeOldTasks(ctx context.Context) error {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
+	_, err := w.db.ExecContext(ctx, `
+		DELETE FROM vm_tasks
+		WHERE status IN ('done', 'failed', 'canceled')
+		  AND finished_at IS NOT NULL
+		  AND finished_at < ?
+	`, cutoff)
+	return err
+}
+
+func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT
+			vt.id, vt.kind, vt.payload_json, vt.status, vt.seq, vt.started_at, vt.finished_at,
+			v.id, v.owner_username, v.cluster_key, v.vmid, v.vmname, v.ip, v.node, v.password, v.sshkeys_json, v.shared_usernames_json,
+			v.security_group_name, v.uestc_restricted, v.config_json, v.prefer_status_json, v.real_status_json,
+			v.sync_state, v.managed, v.version, v.delete_execute_after
+		FROM vm_tasks vt
+		JOIN vms v ON v.id = vt.vm_id
+		WHERE v.deleted_at IS NULL
+		  AND v.managed = 1
+		  AND (
+		    vt.status = 'pending'
+		    OR (vt.status = 'failed' AND vt.updated_at <= ?)
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM vm_tasks prev
+		      WHERE prev.vm_id = vt.vm_id
+		        AND prev.seq < vt.seq
+		        AND prev.status NOT IN ('done', 'canceled')
+		  )
+		ORDER BY vt.vm_id, vt.seq, vt.id
+		LIMIT 20
+	`, time.Now().UTC().Add(-1*time.Minute).Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]vmTaskRow, 0)
+	for rows.Next() {
+		var current vmTaskRow
+		if err := rows.Scan(
+			&current.TaskID,
+			&current.Kind,
+			&current.PayloadJSON,
+			&current.Status,
+			&current.Seq,
+			&current.StartedAt,
+			&current.FinishedAt,
+			&current.VM.ID,
+			&current.VM.OwnerUsername,
+			&current.VM.ClusterKey,
+			&current.VM.VMID,
+			&current.VM.VMName,
+			&current.VM.IP,
+			&current.VM.Node,
+			&current.VM.Password,
+			&current.VM.SSHKeysJSON,
+			&current.VM.SharedUsernamesJSON,
+			&current.VM.SecurityGroupName,
+			&current.VM.UESTCRestricted,
+			&current.VM.ConfigJSON,
+			&current.VM.PreferStatusJSON,
+			&current.VM.RealStatusJSON,
+			&current.VM.SyncState,
+			&current.VM.Managed,
+			&current.VM.Version,
+			&current.VM.DeleteExecuteAfter,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, current)
+	}
+	return items, rows.Err()
+}
+
+func (w *Worker) runTask(ctx context.Context, task vmTaskRow) error {
+	var err error
+	switch task.Kind {
+	case "provision", "apply":
+		err = w.syncVM(ctx, task.VM)
+	case "reboot":
+		err = w.runRebootTask(ctx, task.VM)
+	case "delete":
+		var prefer map[string]any
+		if e := json.Unmarshal([]byte(task.VM.PreferStatusJSON), &prefer); e != nil {
+			return fmt.Errorf("invalid prefer_status_json: %w", e)
+		}
+		err = w.syncDelete(ctx, task.VM, prefer)
+	default:
+		return fmt.Errorf("unknown task kind %q", task.Kind)
+	}
+	if err != nil {
+		return err
+	}
+	return w.markTaskDone(ctx, task.TaskID)
+}
+
+func (w *Worker) runRebootTask(ctx context.Context, vm vmRow) error {
+	node := vm.Node
+	var err error
+	if node == "" {
+		node, _, err = w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID)
+		if err != nil {
+			return err
+		}
+	}
+	if node == "" {
+		return nil
+	}
+	status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if stringFromMap(status, "status", "") != "running" {
+		return nil
+	}
+	return w.pve.RebootVM(ctx, vm.ClusterKey, node, vm.VMID)
+}
+
+func (w *Worker) markTaskRunning(ctx context.Context, taskID int64) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
+		WHERE id = ?
+	`, now, now, taskID)
+	return err
+}
+
+func (w *Worker) markTaskDone(ctx context.Context, taskID int64) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'done', finished_at = COALESCE(finished_at, ?), updated_at = ?
+		WHERE id = ?
+	`, now, now, taskID)
+	return err
+}
+
+func (w *Worker) markTaskFailed(ctx context.Context, taskID int64, message string) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'failed', error = ?, updated_at = ?, finished_at = COALESCE(finished_at, ?)
+		WHERE id = ?
+	`, message, now, now, taskID)
+	return err
 }
 
 func (w *Worker) scanPVE(ctx context.Context) error {
@@ -210,54 +518,6 @@ func (w *Worker) syncUnmanagedVMs(ctx context.Context) error {
 	return nil
 }
 
-func (w *Worker) pendingVMs(ctx context.Context) ([]vmRow, error) {
-	rows, err := w.db.QueryContext(ctx, `
-		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, password, sshkeys_json, shared_usernames_json,
-		       security_group_name, uestc_restricted, config_json, prefer_status_json, real_status_json,
-		       sync_state, managed, version, delete_execute_after
-		FROM vms
-		WHERE deleted_at IS NULL
-		  AND managed = 1
-		  AND sync_state IN ('pending', 'failed', 'deleting')
-		ORDER BY updated_at, id
-		LIMIT 20
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	items := make([]vmRow, 0)
-	for rows.Next() {
-		var current vmRow
-		if err := rows.Scan(
-			&current.ID,
-			&current.OwnerUsername,
-			&current.ClusterKey,
-			&current.VMID,
-			&current.VMName,
-			&current.IP,
-			&current.Node,
-			&current.Password,
-			&current.SSHKeysJSON,
-			&current.SharedUsernamesJSON,
-			&current.SecurityGroupName,
-			&current.UESTCRestricted,
-			&current.ConfigJSON,
-			&current.PreferStatusJSON,
-			&current.RealStatusJSON,
-			&current.SyncState,
-			&current.Managed,
-			&current.Version,
-			&current.DeleteExecuteAfter,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, current)
-	}
-	return items, rows.Err()
-}
-
 func (w *Worker) syncVM(ctx context.Context, vm vmRow) error {
 	var prefer map[string]any
 	if err := json.Unmarshal([]byte(vm.PreferStatusJSON), &prefer); err != nil {
@@ -271,7 +531,7 @@ func (w *Worker) syncVM(ctx context.Context, vm vmRow) error {
 	return w.syncPresent(ctx, vm, prefer)
 }
 
-func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]any) error {
+func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]any) (err error) {
 	cluster, ok := w.config.Root.Cluster[vm.ClusterKey]
 	if !ok {
 		return fmt.Errorf("unknown cluster %s", vm.ClusterKey)
@@ -280,11 +540,23 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 	if err != nil {
 		return err
 	}
+	created := false
 	if !exists {
 		node, err = w.createVM(ctx, vm, prefer, cluster)
 		if err != nil {
 			return err
 		}
+		created = true
+	}
+	if created {
+		defer func() {
+			if err != nil {
+				w.logger.WarnContext(ctx, "rollback failed provision", "cluster", vm.ClusterKey, "vmid", vm.VMID, "error", err)
+				if cleanupErr := w.rollbackProvision(ctx, vm, node); cleanupErr != nil {
+					w.logger.WarnContext(ctx, "rollback provision failed", "cluster", vm.ClusterKey, "vmid", vm.VMID, "error", cleanupErr)
+				}
+			}
+		}()
 	}
 	if node != "" && vm.Node != node {
 		if err := w.markNode(ctx, vm.ID, node); err != nil {
@@ -294,7 +566,7 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 	if err := w.configureVM(ctx, vm, prefer, cluster, node); err != nil {
 		return err
 	}
-	if err := w.applyPower(ctx, vm, node, stringFrom(prefer, "power", "running")); err != nil {
+	if err = w.applyPower(ctx, vm, node, stringFrom(prefer, "power", "running")); err != nil {
 		return err
 	}
 	status, _ := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
@@ -310,7 +582,7 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 	if power == "" {
 		power = stringFrom(prefer, "power", "unknown")
 	}
-	return w.markSynced(ctx, vm.ID, map[string]any{
+	err = w.markSynced(ctx, vm.ID, map[string]any{
 		"intent":         "present",
 		"power":          power,
 		"vmid":           vm.VMID,
@@ -318,6 +590,17 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 		"ip":             vm.IP,
 		"last_synced_at": timestamp(),
 	})
+	return err
+}
+
+func (w *Worker) rollbackProvision(ctx context.Context, vm vmRow, node string) error {
+	if node == "" {
+		return nil
+	}
+	if err := w.pve.DeleteVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, cluster config.Cluster) (string, error) {

@@ -64,6 +64,20 @@ type vmSummary struct {
 	DeleteExecuteAfter *string         `json:"delete_execute_after,omitempty"`
 }
 
+type vmTaskSummary struct {
+	ID         int64           `json:"id"`
+	VMID       int64           `json:"vm_id"`
+	Seq        int             `json:"seq"`
+	Kind       string          `json:"kind"`
+	Payload    json.RawMessage `json:"payload"`
+	Status     string          `json:"status"`
+	Error      *string         `json:"error,omitempty"`
+	CreatedAt  string          `json:"created_at"`
+	UpdatedAt  string          `json:"updated_at"`
+	StartedAt  *string         `json:"started_at,omitempty"`
+	FinishedAt *string         `json:"finished_at,omitempty"`
+}
+
 type securityGroupSummary struct {
 	ID            int64           `json:"id"`
 	OwnerUsername string          `json:"owner_username"`
@@ -151,6 +165,103 @@ func normalizeFirewallPolicyDisplay(value string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
+}
+
+func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, vm_id, seq, kind, payload_json, status, error, created_at, updated_at, started_at, finished_at
+		FROM vm_tasks
+		WHERE vm_id = ?
+		ORDER BY seq, id
+	`, vmID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]vmTaskSummary, 0)
+	for rows.Next() {
+		var item vmTaskSummary
+		var payloadRaw string
+		var startedAt sql.NullString
+		var finishedAt sql.NullString
+		if err := rows.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
+			return nil, err
+		}
+		item.Payload = rawJSONFromString(payloadRaw)
+		if startedAt.Valid {
+			value := startedAt.String
+			item.StartedAt = &value
+		}
+		if finishedAt.Valid {
+			value := finishedAt.String
+			item.FinishedAt = &value
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Server) loadVMTask(ctx context.Context, vmID, taskID int64) (*vmTaskSummary, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, vm_id, seq, kind, payload_json, status, error, created_at, updated_at, started_at, finished_at
+		FROM vm_tasks
+		WHERE vm_id = ? AND id = ?
+	`, vmID, taskID)
+
+	var item vmTaskSummary
+	var payloadRaw string
+	var startedAt sql.NullString
+	var finishedAt sql.NullString
+	if err := row.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
+		return nil, err
+	}
+	item.Payload = rawJSONFromString(payloadRaw)
+	if startedAt.Valid {
+		value := startedAt.String
+		item.StartedAt = &value
+	}
+	if finishedAt.Valid {
+		value := finishedAt.String
+		item.FinishedAt = &value
+	}
+	return &item, nil
+}
+
+func queueVMTaskTx(ctx context.Context, tx *sql.Tx, vmID int64, kind string, payload any) error {
+	var nextSeq int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1
+		FROM vm_tasks
+		WHERE vm_id = ?
+	`, vmID).Scan(&nextSeq); err != nil {
+		return err
+	}
+	payloadJSON := mustJSON(payload)
+	now := timestamp()
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
+		VALUES(?,?,?,?, 'pending', ?, ?)
+	`, vmID, nextSeq, kind, payloadJSON, now, now)
+	return err
+}
+
+func queueVMTaskConn(ctx context.Context, conn *sql.Conn, vmID int64, kind string, payload any) error {
+	var nextSeq int
+	if err := conn.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1
+		FROM vm_tasks
+		WHERE vm_id = ?
+	`, vmID).Scan(&nextSeq); err != nil {
+		return err
+	}
+	payloadJSON := mustJSON(payload)
+	now := timestamp()
+	_, err := conn.ExecContext(ctx, `
+		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
+		VALUES(?,?,?,?, 'pending', ?, ?)
+	`, vmID, nextSeq, kind, payloadJSON, now, now)
+	return err
 }
 
 func normalizeStringList(values []string) []string {

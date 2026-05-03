@@ -191,6 +191,49 @@ ALTER TABLE security_groups ADD COLUMN policy_in TEXT NOT NULL DEFAULT 'ACCEPT';
 ALTER TABLE security_groups ADD COLUMN policy_out TEXT NOT NULL DEFAULT 'ACCEPT';
 `,
 	},
+	{
+		Version: 7,
+		Name:    "vm_tasks_table",
+		SQL: `
+CREATE TABLE IF NOT EXISTS vm_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vm_id INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    UNIQUE(vm_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vm_tasks_vm_status_seq
+    ON vm_tasks(vm_id, status, seq, id);
+`,
+	},
+	{
+		Version: 8,
+		Name:    "maintenance_tasks_table",
+		SQL: `
+CREATE TABLE IF NOT EXISTS maintenance_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_maintenance_tasks_kind_status_created
+    ON maintenance_tasks(kind, status, created_at, id);
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

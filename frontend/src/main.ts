@@ -71,6 +71,21 @@ type VM = {
   delete_requested_at?: string | null
   delete_execute_after?: string | null
   password?: string
+  tasks?: VMTask[]
+}
+
+type VMTask = {
+  id: number
+  vm_id: number
+  seq: number
+  kind: string
+  payload: Record<string, unknown>
+  status: string
+  error?: string | null
+  created_at: string
+  updated_at: string
+  started_at?: string | null
+  finished_at?: string | null
 }
 
 type SecurityGroup = {
@@ -139,6 +154,7 @@ const state = {
   adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys',
   vmDialogMode: 'create' as 'create' | 'edit',
   vmDialogVm: null as VM | null,
+  detailVmId: null as number | null,
   sgDialogMode: 'create' as 'create' | 'edit',
   sgDialogGroup: null as SecurityGroup | null,
   sgRules: [] as Rule[],
@@ -304,6 +320,7 @@ app.innerHTML = `
         <label>Disk GB<input id="vm-disk-gb" class="input" type="number" min="20" /></label>
         <label>Bridge<select id="vm-bridge-key" class="input"></select></label>
         <label>Security Group<select id="vm-sg" class="input"></select></label>
+        <label>Password<input id="vm-password" class="input" type="password" autocomplete="new-password" placeholder="留空则随机生成或保持不变" /></label>
         <label>Power<select id="vm-power" class="input">
           <option value="running">running</option>
           <option value="stopped">stopped</option>
@@ -463,6 +480,7 @@ const els = {
   vmDiskGB: $('#vm-disk-gb') as HTMLInputElement,
   vmBridgeKey: $('#vm-bridge-key') as HTMLSelectElement,
   vmSg: $('#vm-sg') as HTMLSelectElement,
+  vmPassword: $('#vm-password') as HTMLInputElement,
   vmPower: $('#vm-power') as HTMLSelectElement,
   vmUESTC: $('#vm-uestc') as HTMLInputElement,
   vmSSHKeyList: $('#vm-sshkey-list'),
@@ -580,20 +598,55 @@ function visibleVm(vm: VM): boolean {
 }
 
 function powerFrom(vm: VM): string {
-  const prefer = vm.prefer_status as Record<string, unknown>
-  const requested = typeof prefer.power === 'string' ? prefer.power : ''
-  if (requested === 'reboot') {
-    return realPowerFrom(vm)
-  }
-  const real = realPowerFrom(vm)
-  if (real && real !== 'unknown') return real
-  return requested || 'unknown'
+  return realPowerFrom(vm)
 }
 
 function realPowerFrom(vm: VM): string {
   const real = vm.real_status as Record<string, unknown>
   const power = real.power
   return typeof power === 'string' ? power : 'unknown'
+}
+
+function configString(config: Record<string, unknown>, key: string, fallback = ''): string {
+  const value = config[key]
+  return typeof value === 'string' && value ? value : fallback
+}
+
+function configNumber(config: Record<string, unknown>, key: string, fallback = 0): number {
+  const value = config[key]
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return fallback
+}
+
+function taskKindLabel(kind: string): string {
+  switch (kind) {
+    case 'provision':
+      return '创建'
+    case 'apply':
+      return '配置'
+    case 'reboot':
+      return '重启'
+    case 'delete':
+      return '删除'
+    default:
+      return kind
+  }
+}
+
+function taskStatusBadge(status: string): string {
+  const label =
+    status === 'done' ? '完成' :
+    status === 'failed' ? '失败' :
+    status === 'running' ? '执行中' :
+    status === 'canceled' ? '已取消' :
+    status === 'pending' ? '等待中' :
+    status
+  const cls = status === 'done' ? 'ok' : status === 'failed' ? 'bad' : status === 'running' ? 'warn' : 'soft'
+  return `<span class="badge ${cls}">${escapeHtml(label)}</span>`
 }
 
 function statusBadge(label: string): string {
@@ -1039,7 +1092,7 @@ function renderVmFormOptions() {
   els.vmStorageKey.innerHTML = cluster.storage.map((s) => `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)}</option>`).join('')
   els.vmBridgeKey.innerHTML = cluster.network.map((n) => `<option value="${escapeHtml(n.key)}">${escapeHtml(n.key)}</option>`).join('')
   const templates = state.templates.filter((tpl) => tpl.cluster_key === cluster.key)
-  const currentTemplateId = state.vmDialogVm?.prefer_status.template_vmid
+  const currentTemplateId = state.vmDialogVm ? configNumber(state.vmDialogVm.config, 'template_vmid', 0) : 0
   const templateOptions = templates.slice()
   if (currentTemplateId && !templateOptions.some((tpl) => tpl.template_vmid === currentTemplateId)) {
     templateOptions.unshift({
@@ -1110,6 +1163,7 @@ function resetVmDialog() {
   els.vmCpuCores.value = '1'
   els.vmMemoryGB.value = '1'
   els.vmDiskGB.value = '20'
+  els.vmPassword.value = ''
   els.vmPower.value = 'running'
   els.vmShared.value = ''
   els.vmUESTC.checked = false
@@ -1127,16 +1181,17 @@ function fillVmDialog(vm: VM) {
   els.vmId.value = String(vm.id)
   els.vmCluster.value = vm.cluster_key
   renderVmFormOptions()
-  els.vmTemplate.value = String((vm.prefer_status.template_vmid as number | undefined) ?? (state.templates.find((tpl) => tpl.cluster_key === vm.cluster_key)?.template_vmid ?? ''))
+  els.vmTemplate.value = String(configNumber(vm.config, 'template_vmid', state.templates.find((tpl) => tpl.cluster_key === vm.cluster_key)?.template_vmid ?? 0) || '')
   els.vmName.value = vm.vmname
-  els.vmCpuKey.value = String(vm.prefer_status.cpu_key ?? cluster.cpu[0]?.key ?? '')
-  els.vmCpuCores.value = String(vm.prefer_status.cpu_cores ?? 1)
-  els.vmMemoryGB.value = String(vm.prefer_status.memory_gb ?? 1)
-  els.vmStorageKey.value = String(vm.prefer_status.storage_key ?? cluster.storage[0]?.key ?? '')
-  els.vmDiskGB.value = String(vm.prefer_status.disk_gb ?? 20)
-  els.vmBridgeKey.value = String(vm.prefer_status.bridge_key ?? cluster.network[0]?.key ?? '')
+  els.vmCpuKey.value = configString(vm.config, 'cpu_key', cluster.cpu[0]?.key ?? '')
+  els.vmCpuCores.value = String(configNumber(vm.config, 'cpu_cores', 1))
+  els.vmMemoryGB.value = String(configNumber(vm.config, 'memory_gb', 1))
+  els.vmStorageKey.value = configString(vm.config, 'storage_key', cluster.storage[0]?.key ?? '')
+  els.vmDiskGB.value = String(configNumber(vm.config, 'disk_gb', 20))
+  els.vmBridgeKey.value = configString(vm.config, 'bridge_key', cluster.network[0]?.key ?? '')
   els.vmSg.value = vm.security_group_name
-  els.vmPower.value = String(vm.prefer_status.power ?? 'running')
+  els.vmPassword.value = ''
+  els.vmPower.value = realPowerFrom(vm)
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
@@ -1288,6 +1343,41 @@ function renderDetail(vm: VM) {
         <div><span class="label">管理</span><div>${vm.managed ? '受管' : '不受管'}</div></div>
       </div>
     </div>
+    <div class="detail-block">
+      <h4>任务队列</h4>
+      ${
+      vm.tasks?.length
+          ? `<div class="task-list">
+              ${vm.tasks
+                .map((task) => {
+                  const payload = JSON.stringify(task.payload, null, 2)
+                  const error = task.error ? `<div class="task-error mono">${escapeHtml(task.error)}</div>` : ''
+                  const taskActions =
+                    task.status === 'failed'
+                      ? `<button type="button" class="btn btn-mini" data-task-action="retry" data-task-id="${task.id}">重试</button>`
+                      : ''
+                  return `
+                    <section class="task-item">
+                      <div class="task-head">
+                        <div>
+                          <div class="strong">${escapeHtml(taskKindLabel(task.kind))} #${task.seq}</div>
+                          <div class="task-meta mono">#${task.id} · ${escapeHtml(formatTime(task.created_at))}</div>
+                        </div>
+                        <div class="task-head-actions">
+                          ${taskStatusBadge(task.status)}
+                          ${taskActions}
+                        </div>
+                      </div>
+                      <div class="task-payload mono">${escapeHtml(payload)}</div>
+                      ${error}
+                    </section>
+                  `
+                })
+                .join('')}
+            </div>`
+          : `<div class="empty compact">没有任务记录。</div>`
+      }
+    </div>
   `
 }
 
@@ -1404,6 +1494,20 @@ async function loadActiveTab() {
   }
 }
 
+function startVmAutoRefresh() {
+  window.setInterval(async () => {
+    if (!state.me || state.activeTab !== 'vms' || document.visibilityState !== 'visible') {
+      return
+    }
+    try {
+      await loadVMs()
+      renderSummary()
+    } catch (err) {
+      flash((err as Error).message, 'error')
+    }
+  }, 10000)
+}
+
 async function prepareVmDialogData() {
   await loadOptions()
   await Promise.all([loadSecurityGroups(), loadSSHKeys(), loadTemplates()])
@@ -1414,6 +1518,7 @@ function buildCreateVmPayload(): Record<string, unknown> {
   return {
     cluster_key: els.vmCluster.value,
     vmname: els.vmName.value.trim(),
+    password: els.vmPassword.value.trim() || undefined,
     cpu_key: els.vmCpuKey.value,
     cpu_cores: Number(els.vmCpuCores.value),
     memory_gb: Number(els.vmMemoryGB.value),
@@ -1436,6 +1541,7 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
   }
   return {
     vmname: els.vmName.value.trim(),
+    password: els.vmPassword.value.trim() || undefined,
     cpu_key: els.vmCpuKey.value,
     cpu_cores: Number(els.vmCpuCores.value),
     memory_gb: Number(els.vmMemoryGB.value),
@@ -1628,12 +1734,30 @@ async function patchVmPower(id: number, power: string) {
 
 async function openVmDetails(vm: VM) {
   try {
+    state.detailVmId = vm.id
     const detail = await api<VM>(`/api/vms/${vm.id}`)
     renderDetail(detail)
     els.detailDialog.showModal()
   } catch (err) {
     flash((err as Error).message, 'error')
   }
+}
+
+async function retryVmTask(vmId: number, taskId: number) {
+  try {
+    await api(`/api/vms/${vmId}/tasks/${taskId}/retry`, { method: 'POST' })
+    flash('任务已重新入队。', 'ok')
+    await openDetailById(vmId)
+  } catch (err) {
+    flash((err as Error).message, 'error')
+  }
+}
+
+async function openDetailById(id: number) {
+  const vm = currentVmById(id)
+  if (!vm) return
+  const detail = await api<VM>(`/api/vms/${vm.id}`)
+  renderDetail(detail)
 }
 
 function bindEvents() {
@@ -1745,6 +1869,19 @@ function bindEvents() {
       return
     }
 
+    const taskAction = target.closest<HTMLElement>('[data-task-action]')
+    if (taskAction) {
+      const taskId = Number(taskAction.dataset.taskId)
+      const vmId = state.detailVmId
+      if (!vmId || !Number.isFinite(taskId) || taskId <= 0) return
+      switch (taskAction.dataset.taskAction) {
+        case 'retry':
+          await retryVmTask(vmId, taskId)
+          break
+      }
+      return
+    }
+
     const sshAction = target.closest<HTMLElement>('[data-ssh-action]')
     if (sshAction) {
       const id = Number(sshAction.dataset.id)
@@ -1837,6 +1974,7 @@ async function init() {
   }
   renderSummary()
   renderTabs()
+  startVmAutoRefresh()
 }
 
 init().catch((err) => {

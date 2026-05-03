@@ -41,6 +41,20 @@ type VM struct {
 	DeleteExecuteAfter  *time.Time
 }
 
+type VMTask struct {
+	ID          int64
+	VMID        int64
+	Seq         int
+	Kind        string
+	PayloadJSON string
+	Status      string
+	Error       *string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	StartedAt   *time.Time
+	FinishedAt  *time.Time
+}
+
 type SecurityGroup struct {
 	ID            int64
 	OwnerUsername string
