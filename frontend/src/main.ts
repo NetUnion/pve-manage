@@ -247,6 +247,11 @@ app.innerHTML = `
     <button id="toast-close" type="button" class="toast-close" aria-label="关闭提示">×</button>
   </div>
 
+  <div id="loading-indicator" class="loading-indicator" role="status" aria-live="polite" aria-atomic="true" hidden>
+    <span class="loading-spinner" aria-hidden="true"></span>
+    <span class="loading-label">加载中</span>
+  </div>
+
   <main class="shell">
     <div class="workspace">
       <aside class="sidebar">
@@ -521,6 +526,7 @@ const els = {
   toast: $('#toast') as HTMLDivElement,
   toastText: $('#toast-text'),
   toastClose: $('#toast-close') as HTMLButtonElement,
+  loadingIndicator: $('#loading-indicator') as HTMLDivElement,
   loginBtn: $('#login-btn'),
   logoutBtn: $('#logout-btn'),
   vmTable: $('#vm-table'),
@@ -674,6 +680,8 @@ function flash(message: string, kind: 'info' | 'ok' | 'error' = 'info') {
 }
 
 let toastTimer: number | undefined
+let loadingCount = 0
+let loadingTimer: number | undefined
 
 function moveToastToTopLayer() {
   const openDialogs = Array.from(document.querySelectorAll<HTMLDialogElement>('dialog.dialog[open]'))
@@ -703,6 +711,24 @@ function hideToast() {
   }
 }
 
+function beginLoading() {
+  loadingCount += 1
+  if (loadingCount > 1) return
+  window.clearTimeout(loadingTimer)
+  loadingTimer = window.setTimeout(() => {
+    if (loadingCount > 0) {
+      els.loadingIndicator.hidden = false
+    }
+  }, 120)
+}
+
+function endLoading() {
+  loadingCount = Math.max(0, loadingCount - 1)
+  if (loadingCount > 0) return
+  window.clearTimeout(loadingTimer)
+  els.loadingIndicator.hidden = true
+}
+
 function apiPath(path: string): string {
   return path
 }
@@ -712,25 +738,33 @@ async function api<T>(path: string, opts: RequestInit = {}): Promise<T> {
   if (opts.body && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
-  const res = await fetch(apiPath(path), {
-    credentials: 'same-origin',
-    ...opts,
-    headers,
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    let message = text || res.statusText
-    try {
-      const parsed = JSON.parse(text)
-      if (parsed && typeof parsed.error === 'string') {
-        message = parsed.error
+  beginLoading()
+  try {
+    const res = await fetch(apiPath(path), {
+      credentials: 'same-origin',
+      ...opts,
+      headers,
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      let message = text || res.statusText
+      try {
+        const parsed = JSON.parse(text)
+        if (parsed && typeof parsed.error === 'string') {
+          message = parsed.error
+        }
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* ignore */
+      throw new Error(message)
     }
-    throw new Error(message)
+    if (res.status === 204) {
+      return undefined as T
+    }
+    return (await res.json()) as T
+  } finally {
+    endLoading()
   }
-  return (await res.json()) as T
 }
 
 function getCluster(key?: string): ClusterOption | undefined {
@@ -2754,8 +2788,13 @@ function bindEvents() {
   })
   els.toastClose.addEventListener('click', hideToast)
   els.logoutBtn.addEventListener('click', async () => {
-    await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' })
-    window.location.reload()
+    beginLoading()
+    try {
+      await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' })
+      window.location.reload()
+    } finally {
+      endLoading()
+    }
   })
   els.tabs.forEach((tab) => {
     tab.addEventListener('click', async () => {
