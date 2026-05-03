@@ -26,9 +26,8 @@ var (
 )
 
 const (
-	nodePlacementMetricWindow = 5 * time.Hour
-	nodePlacementCPUWeight    = 0.35
-	nodePlacementMemWeight    = 0.65
+	nodePlacementCPUWeight = 0.35
+	nodePlacementMemWeight = 0.65
 )
 
 type apiError struct {
@@ -150,11 +149,14 @@ type templateSummary struct {
 	UpdatedAt    string          `json:"updated_at"`
 }
 
-type nodeMetricCandidate struct {
-	Node     string
-	CPURatio float64
-	MemRatio float64
-	Samples  int
+type nodePlacementCandidate struct {
+	Node         string
+	AllocatedCPU int
+	AllocatedMem int
+	RequestedCPU int
+	RequestedMem int
+	CPULimit     int
+	MemoryLimit  int
 }
 
 type quota struct {
@@ -711,7 +713,7 @@ func (s *Server) deriveIPv4(cluster config.Cluster, bridgeKey string, vmid int) 
 	return fmt.Sprintf("%s/%d", ip.String(), bridge.IPv4.CIDR), nil
 }
 
-func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, cluster config.Cluster, cpuKey string, templateReal json.RawMessage) (string, error) {
+func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, cluster config.Cluster, cpuKey string, requestedCores int, requestedMemoryGB int, templateReal json.RawMessage) (string, error) {
 	cpu, ok := cluster.CPUByKey(cpuKey)
 	if !ok {
 		return "", fmt.Errorf("unknown cpu_key")
@@ -722,7 +724,7 @@ func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, clu
 	}
 
 	templateNode := templateNodeFromRealStatus(templateReal)
-	best, found, err := s.lowestLoadNode(ctx, clusterKey, candidates, templateNode)
+	best, found, err := s.lowestStaticAllocationNode(ctx, clusterKey, candidates, cpu, requestedCores, requestedMemoryGB, templateNode)
 	if err != nil {
 		return "", err
 	}
@@ -735,72 +737,82 @@ func (s *Server) choosePlacementNode(ctx context.Context, clusterKey string, clu
 	return candidates[0], nil
 }
 
-func (s *Server) lowestLoadNode(ctx context.Context, clusterKey string, nodes []string, preferredTie string) (string, bool, error) {
-	var best nodeMetricCandidate
+func (s *Server) lowestStaticAllocationNode(ctx context.Context, clusterKey string, nodes []string, cpu config.CPUClass, requestedCores int, requestedMemoryGB int, preferredTie string) (string, bool, error) {
+	var best nodePlacementCandidate
 	found := false
 	for _, node := range nodes {
-		metric, ok, err := s.averageNodeMetric(ctx, clusterKey, node, nodePlacementMetricWindow)
+		allocatedCPU, allocatedMem, err := s.nodeStaticAllocation(ctx, clusterKey, node)
 		if err != nil {
 			return "", false, err
 		}
-		if !ok {
-			continue
+		current := nodePlacementCandidate{
+			Node:         node,
+			AllocatedCPU: allocatedCPU,
+			AllocatedMem: allocatedMem,
+			RequestedCPU: requestedCores,
+			RequestedMem: requestedMemoryGB,
+			CPULimit:     cpu.Limit,
+			MemoryLimit:  cpu.MemoryLimit,
 		}
-		if !found || betterNodeMetric(metric, best, preferredTie) {
-			best = metric
+		if !found || betterStaticAllocationNode(current, best, preferredTie) {
+			best = current
 			found = true
 		}
 	}
 	return best.Node, found, nil
 }
 
-func (s *Server) averageNodeMetric(ctx context.Context, clusterKey string, node string, window time.Duration) (nodeMetricCandidate, bool, error) {
-	if window <= 0 {
-		window = nodePlacementMetricWindow
-	}
-	since := time.Now().UTC().Add(-window).Format(time.RFC3339Nano)
-	var cpuAvg, memAvg sql.NullFloat64
-	var samples int
-	err := s.db.QueryRowContext(ctx, `
-		SELECT AVG(cpu_ratio), AVG(mem_ratio), COUNT(1)
-		FROM node_metrics
-		WHERE cluster_key = ? AND node = ? AND recorded_at >= ?
-	`, clusterKey, node, since).Scan(&cpuAvg, &memAvg, &samples)
+func (s *Server) nodeStaticAllocation(ctx context.Context, clusterKey string, node string) (cpu int, memory int, err error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT config_json
+		FROM vms
+		WHERE cluster_key = ?
+		  AND deleted_at IS NULL
+		  AND managed = 1
+		  AND (
+		    node = ?
+		    OR (COALESCE(node, '') = '' AND target_node = ?)
+		  )
+	`, clusterKey, node, node)
 	if err != nil {
-		return nodeMetricCandidate{}, false, err
+		return 0, 0, err
 	}
-	if samples == 0 {
-		return nodeMetricCandidate{}, false, nil
+	defer rows.Close()
+
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return 0, 0, err
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+			continue
+		}
+		cpu += intFromOrZero(cfg, "cpu_cores")
+		memory += intFromOrZero(cfg, "memory_gb")
 	}
-	metric := nodeMetricCandidate{Node: node, Samples: samples}
-	if cpuAvg.Valid {
-		metric.CPURatio = cpuAvg.Float64
-	}
-	if memAvg.Valid {
-		metric.MemRatio = memAvg.Float64
-	}
-	return metric, true, nil
+	return cpu, memory, rows.Err()
 }
 
-func betterNodeMetric(current, best nodeMetricCandidate, preferredTie string) bool {
-	currentScore := nodeMetricScore(current)
-	bestScore := nodeMetricScore(best)
+func betterStaticAllocationNode(current, best nodePlacementCandidate, preferredTie string) bool {
+	currentScore := staticAllocationScore(current)
+	bestScore := staticAllocationScore(best)
 	if currentScore < bestScore-1e-9 {
 		return true
 	}
 	if currentScore > bestScore+1e-9 {
 		return false
 	}
-	if current.MemRatio < best.MemRatio-1e-9 {
+	if projectedMemRatio(current) < projectedMemRatio(best)-1e-9 {
 		return true
 	}
-	if current.MemRatio > best.MemRatio+1e-9 {
+	if projectedMemRatio(current) > projectedMemRatio(best)+1e-9 {
 		return false
 	}
-	if current.CPURatio < best.CPURatio-1e-9 {
+	if projectedCPURatio(current) < projectedCPURatio(best)-1e-9 {
 		return true
 	}
-	if current.CPURatio > best.CPURatio+1e-9 {
+	if projectedCPURatio(current) > projectedCPURatio(best)+1e-9 {
 		return false
 	}
 	if current.Node == preferredTie && best.Node != preferredTie {
@@ -812,8 +824,23 @@ func betterNodeMetric(current, best nodeMetricCandidate, preferredTie string) bo
 	return current.Node < best.Node
 }
 
-func nodeMetricScore(metric nodeMetricCandidate) float64 {
-	return metric.CPURatio*nodePlacementCPUWeight + metric.MemRatio*nodePlacementMemWeight
+func staticAllocationScore(candidate nodePlacementCandidate) float64 {
+	return projectedCPURatio(candidate)*nodePlacementCPUWeight + projectedMemRatio(candidate)*nodePlacementMemWeight
+}
+
+func projectedCPURatio(candidate nodePlacementCandidate) float64 {
+	return resourceRatio(candidate.AllocatedCPU+candidate.RequestedCPU, candidate.CPULimit)
+}
+
+func projectedMemRatio(candidate nodePlacementCandidate) float64 {
+	return resourceRatio(candidate.AllocatedMem+candidate.RequestedMem, candidate.MemoryLimit)
+}
+
+func resourceRatio(value int, limit int) float64 {
+	if value <= 0 || limit <= 0 {
+		return 0
+	}
+	return float64(value) / float64(limit)
 }
 
 func templateNodeFromRealStatus(raw json.RawMessage) string {

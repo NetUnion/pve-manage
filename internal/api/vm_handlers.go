@@ -422,7 +422,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	targetNode, err := s.choosePlacementNode(r.Context(), req.ClusterKey, cluster, req.CPUKey, template.RealStatus)
+	targetNode, err := s.choosePlacementNode(r.Context(), req.ClusterKey, cluster, req.CPUKey, req.CPUCores, req.MemoryGB, template.RealStatus)
 	if err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
