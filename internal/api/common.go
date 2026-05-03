@@ -30,11 +30,30 @@ type apiError struct {
 }
 
 type userEnvelope struct {
-	Username string   `json:"username"`
-	Email    string   `json:"email"`
-	Name     string   `json:"name"`
-	Groups   []string `json:"groups"`
-	IsAdmin  bool     `json:"is_admin"`
+	Username string        `json:"username"`
+	Email    string        `json:"email"`
+	Name     string        `json:"name"`
+	Groups   []string      `json:"groups"`
+	IsAdmin  bool          `json:"is_admin"`
+	Quota    quotaEnvelope `json:"quota"`
+	Usage    usageEnvelope `json:"usage"`
+}
+
+type quotaEnvelope struct {
+	Number        int    `json:"number"`
+	CPU           int    `json:"cpu"`
+	Memory        int    `json:"memory"`
+	Storage       int    `json:"storage"`
+	SecurityGroup int    `json:"security_group"`
+	UESTC         string `json:"uestc"`
+}
+
+type usageEnvelope struct {
+	Count         int `json:"count"`
+	CPU           int `json:"cpu"`
+	Memory        int `json:"memory"`
+	Storage       int `json:"storage"`
+	SecurityGroup int `json:"security_group"`
 }
 
 type vmSummary struct {

@@ -126,12 +126,39 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	quota := s.effectiveQuota(user)
+	count, cpu, memory, storage, err := s.listUserVMUsage(r.Context(), user.Username)
+	if err != nil {
+		s.logger.Warn("failed to load user vm usage", "username", user.Username, "error", err)
+		count, cpu, memory, storage = 0, 0, 0, 0
+	}
+	sgCount, err := s.countUserSecurityGroups(r.Context(), user.Username)
+	if err != nil {
+		s.logger.Warn("failed to load user security group count", "username", user.Username, "error", err)
+		sgCount = 0
+	}
+
 	writeJSON(w, http.StatusOK, userEnvelope{
 		Username: user.Username,
 		Email:    user.Email,
 		Name:     user.Name,
 		Groups:   parseJSONStrings(user.GroupsJSON),
 		IsAdmin:  user.IsAdmin,
+		Quota: quotaEnvelope{
+			Number:        quota.Number,
+			CPU:           quota.CPU,
+			Memory:        quota.Memory,
+			Storage:       quota.Storage,
+			SecurityGroup: quota.SecurityGroup,
+			UESTC:         quota.UESTC,
+		},
+		Usage: usageEnvelope{
+			Count:         count,
+			CPU:           cpu,
+			Memory:        memory,
+			Storage:       storage,
+			SecurityGroup: sgCount,
+		},
 	})
 }
 

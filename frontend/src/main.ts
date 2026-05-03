@@ -44,6 +44,21 @@ type Me = {
   name: string
   groups: string[]
   is_admin: boolean
+  quota?: {
+    number: number
+    cpu: number
+    memory: number
+    storage: number
+    security_group: number
+    uestc: 'choose' | 'force'
+  }
+  usage?: {
+    count: number
+    cpu: number
+    memory: number
+    storage: number
+    security_group: number
+  }
 }
 
 type VM = {
@@ -327,6 +342,7 @@ app.innerHTML = `
       </div>
       <input type="hidden" id="vm-mode" value="create" />
       <input type="hidden" id="vm-id" />
+      <div id="vm-flow-hint" class="flow-hint"></div>
       <div class="form-grid">
         <label>Cluster<select id="vm-cluster" class="input"></select></label>
         <label id="vm-owner-row" class="hidden">Owner<input id="vm-owner" class="input" placeholder="owner username" /></label>
@@ -491,6 +507,7 @@ const els = {
   sshName: $('#ssh-name') as HTMLInputElement,
   sshKey: $('#ssh-key') as HTMLTextAreaElement,
   vmId: $('#vm-id') as HTMLInputElement,
+  vmFlowHint: $('#vm-flow-hint'),
   vmCluster: $('#vm-cluster') as HTMLSelectElement,
   vmOwner: $('#vm-owner') as HTMLInputElement,
   vmOwnerRow: $('#vm-owner-row'),
@@ -609,6 +626,10 @@ function getCluster(key?: string): ClusterOption | undefined {
   return state.options?.clusters.find((item) => item.key === key)
 }
 
+function displayClusterName(key?: string): string {
+  return getCluster(key)?.name || key || '-'
+}
+
 function getSelectedCluster(): ClusterOption | undefined {
   return getCluster(els.vmCluster.value)
 }
@@ -645,6 +666,13 @@ function configNumber(config: Record<string, unknown>, key: string, fallback = 0
     if (Number.isFinite(parsed)) return parsed
   }
   return fallback
+}
+
+function remainingQuotaValue(kind: keyof NonNullable<Me['quota']>, usageKind: keyof NonNullable<Me['usage']>): number {
+  const quota = state.me?.quota?.[kind]
+  const usage = state.me?.usage?.[usageKind]
+  if (typeof quota !== 'number' || typeof usage !== 'number') return 0
+  return Math.max(0, quota - usage)
 }
 
 function taskKindLabel(kind: string): string {
@@ -795,7 +823,7 @@ function renderVmTable() {
               <div class="vm-card-main">
                 <div class="strong vm-card-name">${escapeHtml(vm.vmname)}</div>
                 <div>${escapeHtml(vm.owner_username)}</div>
-                <div>${escapeHtml(vm.cluster_key)}</div>
+                <div>${escapeHtml(displayClusterName(vm.cluster_key))}</div>
                 <div>${escapeHtml(vm.node ?? 'auto')}</div>
                 <div>${vm.vmid}</div>
                 <div class="mono">${escapeHtml(vm.ip)}</div>
@@ -937,9 +965,19 @@ function renderVmLimitHint() {
   }
   const cpu = cluster.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster.cpu[0]
   const storage = cluster.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster.storage[0]
-  const cpuLimit = cpu?.limit ?? 0
-  const memoryLimit = cpu?.memory_limit ?? cpu?.limit ?? 0
-  const diskLimit = storage?.limit ?? 0
+  const quotaCPU = remainingQuotaValue('cpu', 'cpu')
+  const quotaMemory = remainingQuotaValue('memory', 'memory')
+  const quotaStorage = remainingQuotaValue('storage', 'storage')
+  const quotaCount = remainingQuotaValue('number', 'count')
+  const selectedVM = state.vmDialogVm
+  const editBonusCPU = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'cpu_cores', 0) : 0
+  const editBonusMemory = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'memory_gb', 0) : 0
+  const editBonusDisk = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'disk_gb', 0) : 0
+  const editBonusCount = state.vmDialogMode === 'edit' && selectedVM ? 1 : 0
+  const cpuLimit = Math.max(0, Math.min(cpu?.limit ?? 0, quotaCPU + editBonusCPU))
+  const memoryLimit = Math.max(0, Math.min(cpu?.memory_limit ?? cpu?.limit ?? 0, quotaMemory + editBonusMemory))
+  const diskLimit = Math.max(0, Math.min(storage?.limit ?? 0, quotaStorage + editBonusDisk))
+  const countLimit = Math.max(0, quotaCount + editBonusCount)
   const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
   const modeText =
     state.vmDialogMode === 'create'
@@ -953,7 +991,39 @@ function renderVmLimitHint() {
       <span>CPU 核数 1 - ${cpuLimit || '-'}</span>
       <span>内存 GB 1 - ${memoryLimit || '-'}</span>
       <span>磁盘 GB 20 - ${diskLimit || '-'}</span>
+      <span>VM 数量 1 - ${countLimit || '-'}</span>
       <span>可用节点 ${escapeHtml(nodeText)}</span>
+    </div>
+  `
+  els.vmCpuCores.max = cpuLimit ? String(cpuLimit) : ''
+  els.vmMemoryGB.max = memoryLimit ? String(memoryLimit) : ''
+  els.vmDiskGB.max = diskLimit ? String(diskLimit) : ''
+  els.vmCpuCores.min = '1'
+  els.vmMemoryGB.min = '1'
+  els.vmDiskGB.min = '20'
+  if (state.vmDialogMode === 'create' && countLimit <= 0) {
+    els.vmSubmit.disabled = true
+  }
+}
+
+function renderVmFlowHint() {
+  const cluster = currentCluster()
+  const cpu = cluster?.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster?.cpu[0]
+  const storage = cluster?.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster?.storage[0]
+  const title = cluster ? `当前 Cluster：${cluster.name}` : '先选择 Cluster'
+  const quotaCPU = remainingQuotaValue('cpu', 'cpu')
+  const quotaMemory = remainingQuotaValue('memory', 'memory')
+  const quotaStorage = remainingQuotaValue('storage', 'storage')
+  const body = [
+    '1. 先选 Cluster，再选 CPU / 存储 / 模板。',
+    cpu ? `CPU 可选：1 - ${Math.max(0, Math.min(cpu.limit || 0, quotaCPU || 0)) || '-'} 核，内存 1 - ${Math.max(0, Math.min(cpu.memory_limit ?? cpu.limit ?? 0, quotaMemory || 0)) || '-'} GB。` : 'CPU 暂无可选项。',
+    storage ? `磁盘可选：20 - ${Math.max(0, Math.min(storage.limit || 0, quotaStorage || 0)) || '-'} GB。` : '磁盘暂无可选项。',
+    '后面的选项只会在当前 Cluster 的范围里展开。',
+  ]
+  els.vmFlowHint.innerHTML = `
+    <div class="flow-hint-title">${escapeHtml(title)}</div>
+    <div class="flow-hint-body">
+      ${body.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}
     </div>
   `
 }
@@ -974,7 +1044,7 @@ function renderTemplates() {
           .map(
             (tpl) => `
               <tr>
-                <td>${escapeHtml(tpl.cluster_key)}</td>
+                <td>${escapeHtml(displayClusterName(tpl.cluster_key))}</td>
                 <td>${tpl.template_vmid}</td>
                 <td class="strong">${escapeHtml(tpl.name)}</td>
                 <td>${escapeHtml(tpl.os_type || '-')}</td>
@@ -1038,7 +1108,7 @@ function renderAdminVMs() {
               <tr>
                 <td class="strong">${escapeHtml(vm.vmname)}</td>
                 <td>${escapeHtml(vm.owner_username)}</td>
-                <td>${escapeHtml(vm.cluster_key)}</td>
+                <td>${escapeHtml(displayClusterName(vm.cluster_key))}</td>
                 <td>${escapeHtml(vm.node ?? 'auto')}</td>
                 <td>${vm.vmid}</td>
                 <td class="mono">${escapeHtml(vm.ip)}</td>
@@ -1176,16 +1246,23 @@ function renderVmFormOptions() {
   const adminScope = Boolean(state.me?.is_admin) && (isAdopt || adminEdit)
   const groups = adminScope ? state.adminSecurityGroups : state.securityGroups
 
-  els.vmCluster.innerHTML = opts.map((cluster) => `<option value="${escapeHtml(cluster.key)}">${escapeHtml(cluster.name)} (${escapeHtml(cluster.key)})</option>`).join('')
+  els.vmCluster.innerHTML = opts.map((cluster) => `<option value="${escapeHtml(cluster.key)}">${escapeHtml(cluster.name)}</option>`).join('')
   if (previousCluster) {
     els.vmCluster.value = previousCluster
   }
   const cluster = currentCluster()
   if (!cluster) return
 
-  els.vmCpuKey.innerHTML = cluster.cpu.map((cpu) => `<option value="${escapeHtml(cpu.key)}">${escapeHtml(cpu.name)}</option>`).join('')
-  els.vmStorageKey.innerHTML = cluster.storage.map((s) => `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)}</option>`).join('')
-  els.vmBridgeKey.innerHTML = cluster.network.map((n) => `<option value="${escapeHtml(n.key)}">${escapeHtml(n.key)}</option>`).join('')
+  const cpuOptions = cluster.cpu
+  const storageOptions = cluster.storage
+  const bridgeOptions = cluster.network
+  const cpuKeys = new Set(cpuOptions.map((cpu) => cpu.key))
+  const storageKeys = new Set(storageOptions.map((storage) => storage.key))
+  const bridgeKeys = new Set(bridgeOptions.map((network) => network.key))
+
+  els.vmCpuKey.innerHTML = cpuOptions.map((cpu) => `<option value="${escapeHtml(cpu.key)}">${escapeHtml(cpu.name)}</option>`).join('')
+  els.vmStorageKey.innerHTML = storageOptions.map((s) => `<option value="${escapeHtml(s.key)}">${escapeHtml(s.name)}</option>`).join('')
+  els.vmBridgeKey.innerHTML = bridgeOptions.map((n) => `<option value="${escapeHtml(n.key)}">${escapeHtml(n.key)}</option>`).join('')
   const templates = isAdopt ? [] : state.templates.filter((tpl) => tpl.cluster_key === cluster.key)
   const currentTemplateId = state.vmDialogVm ? configNumber(state.vmDialogVm.config, 'template_vmid', 0) : 0
   const templateOptions = templates.slice()
@@ -1216,13 +1293,22 @@ function renderVmFormOptions() {
         .join('')
     : `<option value="">请先创建安全组</option>`
 
-  if (previousCpu) els.vmCpuKey.value = previousCpu
-  if (previousStorage) els.vmStorageKey.value = previousStorage
-  if (previousBridge) els.vmBridgeKey.value = previousBridge
+  if (previousCpu && cpuKeys.has(previousCpu)) els.vmCpuKey.value = previousCpu
+  if (!els.vmCpuKey.value && cpuOptions[0]) els.vmCpuKey.value = cpuOptions[0].key
+  if (previousStorage && storageKeys.has(previousStorage)) els.vmStorageKey.value = previousStorage
+  if (!els.vmStorageKey.value && storageOptions[0]) els.vmStorageKey.value = storageOptions[0].key
+  if (previousBridge && bridgeKeys.has(previousBridge)) els.vmBridgeKey.value = previousBridge
+  if (!els.vmBridgeKey.value && bridgeOptions[0]) els.vmBridgeKey.value = bridgeOptions[0].key
   if (previousSg) els.vmSg.value = previousSg
   if (previousTemplate) els.vmTemplate.value = previousTemplate
   if (!isAdopt && !els.vmTemplate.value && templateOptions[0]) {
     els.vmTemplate.value = String(templateOptions[0].template_vmid)
+  }
+  const groupValues = new Set(groups.map((sg) => (isAdopt ? `${sg.owner_username}::${sg.name}` : sg.name)))
+  if (!els.vmSg.value || !groupValues.has(els.vmSg.value)) {
+    if (groups[0]) {
+      els.vmSg.value = isAdopt ? `${groups[0].owner_username}::${groups[0].name}` : groups[0].name
+    }
   }
   if (!els.vmSg.value && groups[0]) {
     els.vmSg.value = isAdopt ? `${groups[0].owner_username}::${groups[0].name}` : groups[0].name
@@ -1251,6 +1337,7 @@ function renderVmFormOptions() {
   }
   renderVmLimitHint()
   renderVmSSHKeyPicker()
+  renderVmFlowHint()
 }
 
 function parseLines(text: string): string[] {
@@ -1472,7 +1559,7 @@ function renderDetail(vm: VM) {
     <div class="detail-grid">
       <div><span class="label">Name</span><div>${escapeHtml(vm.vmname)}</div></div>
       <div><span class="label">Owner</span><div>${escapeHtml(vm.owner_username)}</div></div>
-      <div><span class="label">Cluster</span><div>${escapeHtml(vm.cluster_key)}</div></div>
+      <div><span class="label">Cluster</span><div>${escapeHtml(displayClusterName(vm.cluster_key))}</div></div>
       <div><span class="label">Node</span><div>${escapeHtml(vm.node ?? 'auto')}</div></div>
       <div><span class="label">VMID</span><div>${vm.vmid}</div></div>
       <div><span class="label">IP</span><div class="mono">${escapeHtml(vm.ip)}</div></div>
@@ -1661,6 +1748,10 @@ function startVmAutoRefresh() {
     try {
       await loadVMs()
       renderSummary()
+      if (state.detailVmId && els.detailDialog.open) {
+        const detail = await api<VM>(`/api/vms/${state.detailVmId}`)
+        renderDetail(detail)
+      }
     } catch (err) {
       flash((err as Error).message, 'error')
     }
@@ -2011,6 +2102,7 @@ function bindEvents() {
     openSSHDialog('create')
   })
   els.sshShortcutBtn.addEventListener('click', () => {
+    els.vmDialog.close()
     state.activeTab = 'ssh'
     renderTabs()
     void loadActiveTab()
