@@ -2262,7 +2262,7 @@ function chartPath(values: number[], minValue: number, maxValue: number): string
 }
 
 function percentile95(values: number[]): number {
-  const sorted = values.filter((value) => Number.isFinite(value)).slice().sort((a, b) => a - b)
+  const sorted = values.filter((value) => Number.isFinite(value) && value > 0).slice().sort((a, b) => a - b)
   if (!sorted.length) return 0
   const index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1)
   return sorted[Math.min(index, sorted.length - 1)] ?? 0
