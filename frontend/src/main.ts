@@ -634,6 +634,21 @@ function latestMetric(points?: VMMetricPoint[]): VMMetricPoint | null {
   return points[points.length - 1]
 }
 
+function scrollText(value: string, className = '', threshold = 24): string {
+  const text = value || '-'
+  if (text.length <= threshold) {
+    return `<span class="${className}">${escapeHtml(text)}</span>`
+  }
+  return `
+    <span class="cell-scroll ${className ? ` ${className}` : ''}">
+      <span class="cell-scroll-track">
+        <span>${escapeHtml(text)}</span>
+        <span aria-hidden="true">${escapeHtml(text)}</span>
+      </span>
+    </span>
+  `
+}
+
 function flash(message: string, kind: 'info' | 'ok' | 'error' = 'info') {
   showToast(message, kind)
 }
@@ -819,6 +834,31 @@ function rowActions(vm: VM, allowAdminIp = false): string {
   `
 }
 
+function adminVmActions(vm: VM): string {
+  if (isDeletePending(vm)) {
+    const canRestore = userOwns(vm) || state.me?.is_admin
+    return `
+      <div class="row-actions-grid">
+        <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
+        ${canRestore ? `<button class="btn btn-mini btn-warn" data-action="delete-now" data-id="${vm.id}">立即删除</button>` : ''}
+        ${canRestore ? `<button class="btn btn-mini btn-warn" data-action="restore-delete" data-id="${vm.id}">恢复删除</button>` : ''}
+      </div>
+    `
+  }
+  return `
+    <div class="row-actions-grid">
+      <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
+      ${!vm.managed ? `<button class="btn btn-mini" data-action="adopt" data-id="${vm.id}">接管</button>` : ''}
+      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="running">开机</button>` : ''}
+      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="stopped">关机</button>` : ''}
+      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="reboot">重启</button>` : ''}
+      ${userOwns(vm) ? `<button class="btn btn-mini" data-action="edit" data-id="${vm.id}">编辑</button>` : ''}
+      ${userOwns(vm) ? `<button class="btn btn-mini btn-danger" data-action="delete" data-id="${vm.id}">删除</button>` : ''}
+      ${vm.managed ? `<button class="btn btn-mini" data-action="admin-ip" data-id="${vm.id}">改IP</button>` : ''}
+    </div>
+  `
+}
+
 function renderSummary() {
   const total = state.vms.length
   const pending = state.vms.filter((vm) => vm.sync_state === 'pending' || vm.sync_state === 'syncing').length
@@ -966,20 +1006,20 @@ function renderVmTable() {
         <span>更新时间</span>
       </div>
       ${filtered
-        .map(
-          (vm) => `
+          .map(
+            (vm) => `
             <section class="vm-card" data-vm-id="${vm.id}">
               <div class="vm-card-main">
-                <div class="strong vm-card-name">${escapeHtml(vm.vmname)}</div>
-                <div>${escapeHtml(vm.owner_username)}</div>
-                <div>${escapeHtml(displayClusterName(vm.cluster_key))}</div>
-                <div>${escapeHtml(vm.node ?? 'auto')}</div>
+                <div class="strong vm-card-name">${scrollText(vm.vmname)}</div>
+                <div>${scrollText(vm.owner_username)}</div>
+                <div>${scrollText(displayClusterName(vm.cluster_key))}</div>
+                <div>${scrollText(vm.node ?? 'auto')}</div>
                 <div>${vm.vmid}</div>
-                <div class="mono">${escapeHtml(vm.ip)}</div>
-                <div>${escapeHtml(vm.security_group_name)}</div>
+                <div class="mono">${scrollText(vm.ip, 'mono')}</div>
+                <div>${scrollText(vm.security_group_name)}</div>
                 <div>${statusBadge(vm.sync_state)}</div>
-                <div>${escapeHtml(powerFrom(vm))}</div>
-                <div>${escapeHtml(formatTime(vm.updated_at))}</div>
+                <div>${scrollText(powerFrom(vm))}</div>
+                <div>${scrollText(formatTime(vm.updated_at))}</div>
               </div>
               <div class="vm-card-actions">
                 ${rowActions(vm)}
@@ -1347,27 +1387,25 @@ function renderAdminVMs() {
   const items = sortedAdminVMs()
   els.adminVmTable.innerHTML = `
     <table>
-      <thead><tr><th>Name</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>Managed</th><th>Sync</th><th></th></tr></thead>
+      <thead><tr><th>Name</th><th>Actions</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>Managed</th><th>Sync</th></tr></thead>
       <tbody>
         ${items
           .map(
             (vm) => `
               <tr>
-                <td class="strong">${escapeHtml(vm.vmname)}</td>
-                <td>${escapeHtml(vm.owner_username)}</td>
-                <td>${escapeHtml(displayClusterName(vm.cluster_key))}</td>
-                <td>${escapeHtml(vm.node ?? 'auto')}</td>
+                <td class="strong">${scrollText(vm.vmname, 'strong')}</td>
+                <td class="actions-cell">${adminVmActions(vm)}</td>
+                <td>${scrollText(vm.owner_username)}</td>
+                <td>${scrollText(displayClusterName(vm.cluster_key))}</td>
+                <td>${scrollText(vm.node ?? 'auto')}</td>
                 <td>${vm.vmid}</td>
-                <td class="mono">${escapeHtml(vm.ip)}</td>
+                <td class="mono">${scrollText(vm.ip, 'mono')}</td>
                 <td>${formatPercent(vm.metrics?.cpu)}</td>
                 <td>${formatPercent(vm.metrics?.memory)}</td>
                 <td>${formatRate(vm.metrics?.disk_io)}</td>
                 <td>${formatRate(vm.metrics?.network)}</td>
                 <td>${vm.managed ? 'yes' : 'no'}</td>
                 <td>${statusBadge(vm.sync_state)}</td>
-                <td>
-                  ${rowActions(vm, true)}
-                </td>
               </tr>
             `,
           )

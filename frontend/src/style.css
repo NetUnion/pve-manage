@@ -403,6 +403,51 @@ select {
   gap: 8px;
 }
 
+.cell-scroll {
+  display: block;
+  overflow: hidden;
+  position: relative;
+  min-width: 0;
+}
+
+.cell-scroll-track {
+  display: inline-flex;
+  width: max-content;
+  min-width: 100%;
+  gap: 24px;
+  will-change: transform;
+}
+
+.cell-scroll-track > span {
+  flex: 0 0 auto;
+}
+
+.cell-scroll:hover .cell-scroll-track {
+  animation: cell-marquee 8s linear infinite;
+}
+
+td .cell-scroll,
+th .cell-scroll {
+  max-width: 100%;
+}
+
+.actions-cell {
+  min-width: 340px;
+}
+
+.row-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 320px;
+}
+
+.row-actions-grid .btn {
+  width: 100%;
+  justify-content: center;
+  white-space: nowrap;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -439,6 +484,15 @@ th {
 
 .table-sort:hover {
   color: var(--accent);
+}
+
+@keyframes cell-marquee {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(calc(-50% - 12px));
+  }
 }
 
 .metric-cards {
