@@ -102,6 +102,16 @@ type nodeLoad struct {
 	samples  int
 }
 
+type nodeCandidate struct {
+	name        string
+	score       float64
+	cpuScore    float64
+	memScore    float64
+	avgScore    float64
+	avgCPUScore float64
+	avgMemScore float64
+}
+
 func New(logger *slog.Logger, db *sql.DB, cfg *config.App, pveClient *pve.Client) *Worker {
 	return &Worker{
 		logger: logger,
@@ -1049,33 +1059,40 @@ func (w *Worker) chooseNode(ctx context.Context, clusterKey string, cluster conf
 		return fallback, nil
 	}
 
-	type candidate struct {
-		name     string
-		score    float64
-		cpuScore float64
-		memScore float64
-	}
-	best := candidate{score: math.Inf(1)}
+	best := nodeCandidate{score: math.Inf(1), avgScore: math.Inf(1)}
 	for _, node := range candidates {
 		status, err := w.pve.GetNodeStatus(ctx, clusterKey, node)
 		if err != nil {
 			w.logger.WarnContext(ctx, "node status unavailable", "cluster", clusterKey, "node", node, "error", err)
 			continue
 		}
-		load, err := w.nodeLoad(ctx, clusterKey, node, status)
-		if err != nil {
-			w.logger.WarnContext(ctx, "node load unavailable", "cluster", clusterKey, "node", node, "error", err)
-			continue
-		}
+		load := currentNodeLoad(status)
 		score, cpuScore, memScore := scoreNodeLoad(load, status, requestedCores, requestedMemoryGB)
-		if score < best.score-1e-9 ||
-			(math.Abs(score-best.score) <= 1e-9 && (cpuScore < best.cpuScore-1e-9 ||
-				(math.Abs(cpuScore-best.cpuScore) <= 1e-9 && (memScore < best.memScore-1e-9 ||
-					(math.Abs(memScore-best.memScore) <= 1e-9 && node == fallback))))) {
-			best = candidate{name: node, score: score, cpuScore: cpuScore, memScore: memScore}
+
+		avgScore := math.Inf(1)
+		avgCPUScore := math.Inf(1)
+		avgMemScore := math.Inf(1)
+		if avgLoad, err := w.averageNodeLoad(ctx, clusterKey, node); err == nil && avgLoad.samples > 0 {
+			avgScore, avgCPUScore, avgMemScore = scoreNodeLoad(avgLoad, status, requestedCores, requestedMemoryGB)
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			w.logger.WarnContext(ctx, "historical node load unavailable", "cluster", clusterKey, "node", node, "error", err)
+		}
+
+		current := nodeCandidate{
+			name:        node,
+			score:       score,
+			cpuScore:    cpuScore,
+			memScore:    memScore,
+			avgScore:    avgScore,
+			avgCPUScore: avgCPUScore,
+			avgMemScore: avgMemScore,
+		}
+		if betterNodeCandidate(current, best, fallback) {
+			best = current
 		}
 	}
 	if best.name != "" {
+		w.logger.InfoContext(ctx, "node selected", "cluster", clusterKey, "cpu_key", cpuKey, "node", best.name, "score", best.score, "cpu_score", best.cpuScore, "mem_score", best.memScore)
 		return best.name, nil
 	}
 	for _, node := range candidates {
@@ -1086,16 +1103,58 @@ func (w *Worker) chooseNode(ctx context.Context, clusterKey string, cluster conf
 	return candidates[0], nil
 }
 
-func (w *Worker) nodeLoad(ctx context.Context, clusterKey, node string, fallback pve.NodeStatus) (nodeLoad, error) {
-	avg, err := w.averageNodeLoad(ctx, clusterKey, node)
-	if err == nil && avg.samples > 0 {
-		return avg, nil
+func betterNodeCandidate(current, best nodeCandidate, fallback string) bool {
+	if current.score < best.score-1e-9 {
+		return true
 	}
+	if math.Abs(current.score-best.score) > 1e-9 {
+		return false
+	}
+	if current.cpuScore < best.cpuScore-1e-9 {
+		return true
+	}
+	if math.Abs(current.cpuScore-best.cpuScore) > 1e-9 {
+		return false
+	}
+	if current.memScore < best.memScore-1e-9 {
+		return true
+	}
+	if math.Abs(current.memScore-best.memScore) > 1e-9 {
+		return false
+	}
+	if current.avgScore < best.avgScore-1e-9 {
+		return true
+	}
+	if math.Abs(current.avgScore-best.avgScore) > 1e-9 {
+		return false
+	}
+	if current.avgCPUScore < best.avgCPUScore-1e-9 {
+		return true
+	}
+	if math.Abs(current.avgCPUScore-best.avgCPUScore) > 1e-9 {
+		return false
+	}
+	if current.avgMemScore < best.avgMemScore-1e-9 {
+		return true
+	}
+	if math.Abs(current.avgMemScore-best.avgMemScore) > 1e-9 {
+		return false
+	}
+	if current.name == fallback && best.name != fallback {
+		return true
+	}
+	if current.name != fallback && best.name == fallback {
+		return false
+	}
+	return current.name < best.name
+}
+
+func currentNodeLoad(status pve.NodeStatus) nodeLoad {
 	return nodeLoad{
-		cpuRatio: nodeCPUPercent(fallback) / 100.0,
-		memRatio: nodeMemRatio(fallback),
+		cpuRatio: nodeCPUPercent(status) / 100.0,
+		memRatio: nodeMemRatio(status),
 		samples:  1,
-	}, nil
+	}
 }
 
 func (w *Worker) averageNodeLoad(ctx context.Context, clusterKey, node string) (nodeLoad, error) {
