@@ -639,19 +639,31 @@ function latestMetric(points?: VMMetricPoint[]): VMMetricPoint | null {
   return points[points.length - 1]
 }
 
-function scrollText(value: string, className = '', threshold = 24): string {
+function scrollText(value: string, className = ''): string {
   const text = value || '-'
-  if (text.length <= threshold) {
-    return `<span class="${className}">${escapeHtml(text)}</span>`
-  }
   return `
-    <span class="cell-scroll ${className ? ` ${className}` : ''}" title="${escapeHtml(text)}">
-      <span class="cell-scroll-track">
-        <span>${escapeHtml(text)}</span>
-        <span aria-hidden="true">${escapeHtml(text)}</span>
-      </span>
+    <span class="cell-scroll${className ? ` ${className}` : ''}" title="${escapeHtml(text)}">
+      <span class="cell-scroll-text" data-text="${escapeHtml(text)}">${escapeHtml(text)}</span>
     </span>
   `
+}
+
+let scrollMeasureTimer: number | undefined
+
+function refreshScrollableText(root: ParentNode = document) {
+  root.querySelectorAll<HTMLElement>('.cell-scroll').forEach((cell) => {
+    const text = cell.querySelector<HTMLElement>('.cell-scroll-text')
+    if (!text) return
+    const needsScroll = text.scrollWidth > cell.clientWidth + 1
+    cell.classList.toggle('is-overflowing', needsScroll)
+  })
+}
+
+function scheduleScrollableTextRefresh(root: ParentNode = document) {
+  window.clearTimeout(scrollMeasureTimer)
+  scrollMeasureTimer = window.setTimeout(() => {
+    window.requestAnimationFrame(() => refreshScrollableText(root))
+  }, 0)
 }
 
 function flash(message: string, kind: 'info' | 'ok' | 'error' = 'info') {
@@ -1067,6 +1079,7 @@ function renderVmTable() {
       </table>
     </div>
   `
+  scheduleScrollableTextRefresh(els.vmTable)
 }
 
 function renderSecurityGroups() {
@@ -1103,6 +1116,7 @@ function renderSecurityGroups() {
       </tbody>
     </table>
   `
+  scheduleScrollableTextRefresh(els.sgTable)
 }
 
 function shortKey(key: string): string {
@@ -1263,6 +1277,7 @@ function renderVmWizardProgress() {
         .join('')}
     </div>
   `
+  scheduleScrollableTextRefresh(els.sshTable)
 }
 
 function renderVmWizardHelp() {
@@ -1416,6 +1431,7 @@ function renderTemplates() {
       </tbody>
     </table>
   `
+  scheduleScrollableTextRefresh(els.templateTable)
 }
 
 function renderUsers() {
@@ -1447,6 +1463,7 @@ function renderUsers() {
       </tbody>
     </table>
   `
+  scheduleScrollableTextRefresh(els.userTable)
 }
 
 function renderAdminVMs() {
@@ -1502,6 +1519,7 @@ function renderAdminVMs() {
       </tbody>
     </table>
   `
+  scheduleScrollableTextRefresh(els.adminVmTable)
 }
 
 function sortedAdminVMs(): VM[] {
@@ -1559,6 +1577,7 @@ function renderAdminSecurityGroups() {
       </tbody>
     </table>
   `
+  scheduleScrollableTextRefresh(els.adminSecurityGroupTable)
 }
 
 function renderAdminSSHKeys() {
@@ -1589,6 +1608,7 @@ function renderAdminSSHKeys() {
       </tbody>
     </table>
   `
+  scheduleScrollableTextRefresh(els.adminSshKeyTable)
 }
 
 function renderAdminMaintenance() {
@@ -1621,6 +1641,7 @@ function renderAdminMaintenance() {
       </tbody>
     </table>
   `
+  scheduleScrollableTextRefresh(els.adminMaintenanceTable)
 }
 
 function showDialog(dialog: HTMLDialogElement) {
@@ -2105,6 +2126,7 @@ function renderDetail(vm: VM) {
       }
     </div>
   `
+  scheduleScrollableTextRefresh(els.detailPageContent)
 }
 
 function renderMetricCharts(points: VMMetricPoint[]): string {
@@ -2960,6 +2982,9 @@ function bindEvents() {
     applyRoute(window.location.pathname)
     renderTabs()
     void loadActiveTab()
+  })
+  window.addEventListener('resize', () => {
+    scheduleScrollableTextRefresh()
   })
 }
 

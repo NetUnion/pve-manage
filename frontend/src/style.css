@@ -405,23 +405,27 @@ select {
   overflow: hidden;
   position: relative;
   min-width: 0;
+  width: 100%;
 }
 
-.cell-scroll-track {
-  display: inline-flex;
-  width: max-content;
+.cell-scroll-text {
+  display: inline-block;
+  white-space: nowrap;
   min-width: 100%;
-  gap: 24px;
   will-change: transform;
+}
+
+.cell-scroll.is-overflowing .cell-scroll-text {
   animation: cell-marquee 8s linear infinite;
   animation-play-state: paused;
 }
 
-.cell-scroll-track > span {
-  flex: 0 0 auto;
+.cell-scroll.is-overflowing .cell-scroll-text::after {
+  content: attr(data-text);
+  padding-left: 24px;
 }
 
-.cell-scroll:hover .cell-scroll-track {
+.cell-scroll.is-overflowing:hover .cell-scroll-text {
   animation-play-state: running;
 }
 
@@ -1082,6 +1086,14 @@ textarea:disabled {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
+}
+
+.detail-grid > div {
+  min-width: 0;
+}
+
+.detail-grid > div > div {
+  min-width: 0;
 }
 
 .detail-grid .label {
