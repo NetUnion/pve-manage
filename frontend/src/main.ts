@@ -2129,9 +2129,11 @@ function renderDiskIOChart(points: VMMetricPoint[]): string {
   const labelX = 80
   const readValues = points.map((point) => metricNumber(point.disk_read ?? point.disk_io))
   const writeValues = points.map((point) => metricNumber(point.disk_write ?? 0))
+  const combinedValues = points.map((_, index) => (readValues[index] ?? 0) + (writeValues[index] ?? 0))
   const latestRead = readValues[readValues.length - 1] ?? 0
   const latestWrite = writeValues[writeValues.length - 1] ?? 0
   const maxValue = Math.max(...readValues, ...writeValues, 0)
+  const p95Value = percentile95(combinedValues)
   const readPath = chartPath(readValues, 0, maxValue)
   const writePath = chartPath(writeValues, 0, maxValue)
   const readArea = readPath ? `${readPath} L ${chartRight} ${chartBottom} L ${chartLeft} ${chartBottom} Z` : ''
@@ -2183,7 +2185,7 @@ function renderDiskIOChart(points: VMMetricPoint[]): string {
       <div class="metric-chart-foot">
         <span class="metric-legend read">Read</span>
         <span class="metric-legend write">Write</span>
-        <span>Peak ${escapeHtml(formatRate(maxValue))}</span>
+        <span>P95 ${escapeHtml(formatRate(p95Value))}</span>
       </div>
     </section>
   `
@@ -2206,6 +2208,7 @@ function renderMetricChart(
   const latest = values[values.length - 1] ?? 0
   const maxValue = Math.max(...values, key === 'cpu' || key === 'memory' ? 1 : 0)
   const minValue = 0
+  const p95Value = percentile95(values)
   const path = chartPath(values, minValue, maxValue)
   const area = path ? `${path} L ${chartRight} ${chartBottom} L ${chartLeft} ${chartBottom} Z` : ''
   const lastPoint = values.length ? chartPoint(values.length - 1, values[values.length - 1] ?? 0, values.length, minValue, maxValue) : null
@@ -2242,7 +2245,7 @@ function renderMetricChart(
       </svg>
       <div class="metric-chart-foot">
         <span>0</span>
-        <span>Peak ${escapeHtml(formatter(maxValue))}</span>
+        <span>P95 ${escapeHtml(formatter(p95Value))}</span>
       </div>
     </section>
   `
@@ -2256,6 +2259,13 @@ function chartPath(values: number[], minValue: number, maxValue: number): string
       return `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`
     })
     .join(' ')
+}
+
+function percentile95(values: number[]): number {
+  const sorted = values.filter((value) => Number.isFinite(value)).slice().sort((a, b) => a - b)
+  if (!sorted.length) return 0
+  const index = Math.max(0, Math.ceil(sorted.length * 0.95) - 1)
+  return sorted[Math.min(index, sorted.length - 1)] ?? 0
 }
 
 function chartPoint(index: number, value: number, count: number, minValue: number, maxValue: number): { x: string; y: string } {
