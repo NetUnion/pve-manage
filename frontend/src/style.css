@@ -482,19 +482,6 @@ th .cell-scroll {
   width: 110px;
 }
 
-.row-actions-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  min-width: 320px;
-}
-
-.row-actions-grid .btn {
-  width: 100%;
-  justify-content: center;
-  white-space: nowrap;
-}
-
 table {
   width: 100%;
   border-collapse: collapse;

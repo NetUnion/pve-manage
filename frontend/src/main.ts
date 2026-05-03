@@ -868,28 +868,7 @@ function rowActions(vm: VM, allowAdminIp = false): string {
 }
 
 function adminVmActions(vm: VM): string {
-  if (isDeletePending(vm)) {
-    const canRestore = userOwns(vm) || state.me?.is_admin
-    return `
-      <div class="row-actions-grid">
-        <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
-        ${canRestore ? `<button class="btn btn-mini btn-warn" data-action="delete-now" data-id="${vm.id}">立即删除</button>` : ''}
-        ${canRestore ? `<button class="btn btn-mini btn-warn" data-action="restore-delete" data-id="${vm.id}">恢复删除</button>` : ''}
-      </div>
-    `
-  }
-  return `
-    <div class="row-actions-grid">
-      <button class="btn btn-mini" data-action="detail" data-id="${vm.id}">详情</button>
-      ${!vm.managed ? `<button class="btn btn-mini" data-action="adopt" data-id="${vm.id}">接管</button>` : ''}
-      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="running">开机</button>` : ''}
-      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="stopped">关机</button>` : ''}
-      ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="reboot">重启</button>` : ''}
-      ${userOwns(vm) ? `<button class="btn btn-mini" data-action="edit" data-id="${vm.id}">编辑</button>` : ''}
-      ${userOwns(vm) ? `<button class="btn btn-mini btn-danger" data-action="delete" data-id="${vm.id}">删除</button>` : ''}
-      ${vm.managed ? `<button class="btn btn-mini" data-action="admin-ip" data-id="${vm.id}">改IP</button>` : ''}
-    </div>
-  `
+  return rowActions(vm)
 }
 
 function renderSummary() {
