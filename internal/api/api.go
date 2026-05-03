@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/NetUnion/pve-manage/internal/auth"
@@ -57,6 +58,18 @@ func (s *Server) Handler() http.Handler {
 		http.NotFound(w, r)
 	})
 	r.Handle("/assets/*", s.webui)
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") {
+			http.NotFound(w, r)
+			return
+		}
+		if s.webui != nil {
+			r.URL.Path = "/"
+			s.webui.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
 
 	r.Get("/auth/login", s.auth.HandleLogin)
 	r.Get("/auth/oidc/callback", s.auth.HandleCallback)

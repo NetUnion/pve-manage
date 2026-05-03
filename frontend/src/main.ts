@@ -103,6 +103,10 @@ type VMMetrics = {
 
 type AdminVmSortKey = 'cpu' | 'memory' | 'disk_io' | 'network'
 
+type AppTab = 'vms' | 'security' | 'ssh' | 'templates' | 'admin' | 'vm-detail'
+
+type AdminTab = 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance'
+
 type VMMetricPoint = {
   time: string
   cpu: number
@@ -200,8 +204,8 @@ const state = {
   maintenanceTasks: [] as MaintenanceTask[],
   templates: [] as Template[],
   users: [] as UserRow[],
-  activeTab: 'vms',
-  adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance',
+  activeTab: 'vms' as AppTab,
+  adminTab: 'users' as AdminTab,
   adminVmSort: { key: 'cpu' as AdminVmSortKey, dir: 'desc' as 'asc' | 'desc' },
   detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
@@ -483,19 +487,6 @@ app.innerHTML = `
     </form>
   </dialog>
 
-  <dialog id="detail-dialog" class="dialog">
-    <div class="dialog-body">
-      <div class="dialog-head">
-        <h3>VM Details</h3>
-        <button type="button" class="icon-btn" data-close-dialog="detail-dialog">×</button>
-      </div>
-      <div id="detail-content" class="detail-content"></div>
-      <div class="dialog-actions">
-        <button type="button" class="btn btn-ghost" data-close-dialog="detail-dialog">关闭</button>
-      </div>
-    </div>
-  </dialog>
-
   <dialog id="ip-dialog" class="dialog">
     <form id="ip-form" class="dialog-body">
       <div class="dialog-head">
@@ -548,7 +539,6 @@ const els = {
   vmDialog: $('#vm-dialog') as HTMLDialogElement,
   sshDialog: $('#ssh-dialog') as HTMLDialogElement,
   sgDialog: $('#sg-dialog') as HTMLDialogElement,
-  detailDialog: $('#detail-dialog') as HTMLDialogElement,
   detailPageContent: $('#detail-page-content'),
   ipDialog: $('#ip-dialog') as HTMLDialogElement,
   vmForm: $('#vm-form') as HTMLFormElement,
@@ -596,7 +586,6 @@ const els = {
   sgPolicyOut: $('#sg-policy-out') as HTMLSelectElement,
   ruleRows: $('#rule-rows'),
   addRuleBtn: $('#add-rule-btn'),
-  detailContent: $('#detail-content'),
   ipVmId: $('#ip-vm-id') as HTMLInputElement,
   ipValue: $('#ip-value') as HTMLInputElement,
   vmWizardProgress: $('#vm-wizard-progress'),
@@ -855,6 +844,79 @@ function renderMe() {
   els.loginBtn.hidden = true
   els.logoutBtn.hidden = false
   document.querySelectorAll<HTMLElement>('.admin-only').forEach((el) => (el.hidden = !state.me?.is_admin))
+}
+
+function routeForTab(tab: AppTab, adminTab: AdminTab = state.adminTab): string {
+  switch (tab) {
+    case 'security':
+      return '/security-groups'
+    case 'ssh':
+      return '/ssh-keys'
+    case 'templates':
+      return '/templates'
+    case 'admin':
+      return `/admin/${adminTab}`
+    case 'vm-detail':
+      return state.detailVmId ? `/vms/${state.detailVmId}` : '/vms'
+    case 'vms':
+    default:
+      return '/vms'
+  }
+}
+
+function setRoute(path: string) {
+  if (window.location.pathname !== path) {
+    history.pushState({}, '', path)
+  }
+}
+
+function applyRoute(pathname: string): boolean {
+  const path = decodeURIComponent(pathname)
+  const vmMatch = path.match(/^\/vms\/(\d+)$/)
+  if (vmMatch) {
+    state.activeTab = 'vm-detail'
+    state.detailVmId = Number(vmMatch[1])
+    return true
+  }
+
+  const adminMatch = path.match(/^\/admin(?:\/(users|vms|security-groups|ssh-keys|maintenance))?$/)
+  if (adminMatch) {
+    state.activeTab = 'admin'
+    state.adminTab = (adminMatch[1] as AdminTab | undefined) ?? 'users'
+    return true
+  }
+
+  switch (path) {
+    case '/':
+    case '/vms':
+      state.activeTab = 'vms'
+      state.detailVmId = null
+      return true
+    case '/security-groups':
+    case '/security groups':
+      state.activeTab = 'security'
+      state.detailVmId = null
+      return true
+    case '/ssh-keys':
+      state.activeTab = 'ssh'
+      state.detailVmId = null
+      return true
+    case '/templates':
+      state.activeTab = 'templates'
+      state.detailVmId = null
+      return true
+    default:
+      state.activeTab = 'vms'
+      state.detailVmId = null
+      return false
+  }
+}
+
+async function navigateTo(path: string) {
+  applyRoute(path)
+  setRoute(path)
+  renderTabs()
+  await loadActiveTab()
 }
 
 function renderTabs() {
@@ -2297,20 +2359,7 @@ async function patchVmPower(id: number, power: string) {
 }
 
 async function openVmDetails(vm: VM) {
-  window.location.hash = `#/vms/${vm.id}`
-  await showVmDetailPage(vm.id)
-}
-
-async function showVmDetailPage(id: number) {
-  try {
-    state.detailVmId = id
-    state.activeTab = 'vm-detail'
-    renderTabs()
-    const detail = await api<VM>(`/api/vms/${id}`)
-    renderDetail(detail)
-  } catch (err) {
-    flash((err as Error).message, 'error')
-  }
+  await navigateTo(`/vms/${vm.id}`)
 }
 
 async function retryVmTask(vmId: number, taskId: number) {
@@ -2329,22 +2378,9 @@ async function openDetailById(id: number) {
   renderDetail(detail)
 }
 
-async function handleHashRoute() {
-  const match = window.location.hash.match(/^#\/vms\/(\d+)$/)
-  if (!match) return false
-  await showVmDetailPage(Number(match[1]))
-  return true
-}
-
 function backToVMList() {
-  state.activeTab = 'vms'
-  state.detailVmId = null
   state.detailVM = null
-  if (window.location.hash.startsWith('#/vms/')) {
-    history.pushState('', document.title, window.location.pathname + window.location.search)
-  }
-  renderTabs()
-  void loadActiveTab()
+  void navigateTo('/vms')
 }
 
 function bindEvents() {
@@ -2358,13 +2394,9 @@ function bindEvents() {
   })
   els.tabs.forEach((tab) => {
     tab.addEventListener('click', async () => {
-      state.activeTab = tab.dataset.tab || 'vms'
-      if (window.location.hash.startsWith('#/vms/')) {
-        history.pushState('', document.title, window.location.pathname + window.location.search)
-      }
-      renderTabs()
       try {
-        await loadActiveTab()
+        const nextTab = (tab.dataset.tab || 'vms') as AppTab
+        await navigateTo(routeForTab(nextTab))
       } catch (err) {
         flash((err as Error).message, 'error')
       }
@@ -2373,10 +2405,9 @@ function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>('[data-admin-tab]').forEach((button) => {
     button.addEventListener('click', async () => {
       const tab = button.dataset.adminTab
-      state.adminTab = tab === 'vms' || tab === 'security-groups' || tab === 'ssh-keys' || tab === 'maintenance' ? tab : 'users'
-      renderTabs()
       try {
-        await loadActiveTab()
+        const nextAdminTab = tab === 'vms' || tab === 'security-groups' || tab === 'ssh-keys' || tab === 'maintenance' ? tab : 'users'
+        await navigateTo(routeForTab('admin', nextAdminTab))
       } catch (err) {
         flash((err as Error).message, 'error')
       }
@@ -2401,9 +2432,7 @@ function bindEvents() {
   })
   els.sshShortcutBtn.addEventListener('click', () => {
     els.vmDialog.close()
-    state.activeTab = 'ssh'
-    renderTabs()
-    void loadActiveTab()
+    void navigateTo('/ssh-keys')
   })
   els.vmCluster.addEventListener('change', () => {
     if (state.vmDialogMode === 'create') {
@@ -2603,8 +2632,10 @@ function bindEvents() {
     renderRuleRows()
   })
 
-  window.addEventListener('hashchange', () => {
-    void handleHashRoute()
+  window.addEventListener('popstate', () => {
+    applyRoute(window.location.pathname)
+    renderTabs()
+    void loadActiveTab()
   })
 }
 
@@ -2613,8 +2644,11 @@ async function init() {
   try {
     await loadMe()
     if (state.me) {
-      const routed = await handleHashRoute()
-      if (!routed) await loadActiveTab()
+      const validRoute = applyRoute(window.location.pathname)
+      if (window.location.pathname === '/' || !validRoute) {
+        history.replaceState({}, '', routeForTab(state.activeTab))
+      }
+      await loadActiveTab()
     } else {
       els.summary.innerHTML = ''
       renderVmTable()
