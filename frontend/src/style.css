@@ -711,6 +711,12 @@ th {
   gap: 10px;
 }
 
+.detail-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 10px;
+}
+
 .task-item {
   border: 1px solid var(--border);
   border-radius: 10px;

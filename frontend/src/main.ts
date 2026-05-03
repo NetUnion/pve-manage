@@ -59,6 +59,7 @@ type VM = {
   security_group_name: string
   uestc_restricted: boolean
   managed: boolean
+  task_queue_paused: boolean
   config: Record<string, unknown>
   prefer_status: Record<string, unknown>
   real_status: Record<string, unknown>
@@ -78,6 +79,18 @@ type VMTask = {
   id: number
   vm_id: number
   seq: number
+  kind: string
+  payload: Record<string, unknown>
+  status: string
+  error?: string | null
+  created_at: string
+  updated_at: string
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+type MaintenanceTask = {
+  id: number
   kind: string
   payload: Record<string, unknown>
   status: string
@@ -148,10 +161,11 @@ const state = {
   adminSecurityGroups: [] as SecurityGroup[],
   sshKeys: [] as SSHKey[],
   adminSSHKeys: [] as SSHKey[],
+  maintenanceTasks: [] as MaintenanceTask[],
   templates: [] as Template[],
   users: [] as UserRow[],
   activeTab: 'vms',
-  adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys',
+  adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance',
   vmDialogMode: 'create' as 'create' | 'edit',
   vmDialogVm: null as VM | null,
   detailVmId: null as number | null,
@@ -283,6 +297,7 @@ app.innerHTML = `
             <button class="subtab" data-admin-tab="vms">All VMs</button>
             <button class="subtab" data-admin-tab="security-groups">All Security Groups</button>
             <button class="subtab" data-admin-tab="ssh-keys">All SSH Keys</button>
+            <button class="subtab" data-admin-tab="maintenance">Maintenance</button>
           </div>
           <div id="admin-users-panel" class="subpanel active">
             <div id="user-table" class="table-wrap"></div>
@@ -295,6 +310,9 @@ app.innerHTML = `
           </div>
           <div id="admin-ssh-keys-panel" class="subpanel">
             <div id="admin-ssh-key-table" class="table-wrap"></div>
+          </div>
+          <div id="admin-maintenance-panel" class="subpanel">
+            <div id="admin-maintenance-table" class="table-wrap"></div>
           </div>
         </section>
       </div>
@@ -443,6 +461,7 @@ const els = {
   adminVmTable: $('#admin-vm-table'),
   adminSecurityGroupTable: $('#admin-security-group-table'),
   adminSshKeyTable: $('#admin-ssh-key-table'),
+  adminMaintenanceTable: $('#admin-maintenance-table'),
   createVmBtn: $('#create-vm-btn'),
   createSgBtn: $('#create-sg-btn'),
   tabs: Array.from(document.querySelectorAll<HTMLButtonElement>('.tab')),
@@ -682,6 +701,8 @@ function rowActions(vm: VM, allowAdminIp = false): string {
       ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="running">开机</button>` : ''}
       ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="stopped">关机</button>` : ''}
       ${vm.managed ? `<button class="btn btn-mini" data-action="power" data-id="${vm.id}" data-power="reboot">重启</button>` : ''}
+      ${vm.managed && !vm.task_queue_paused ? `<button class="btn btn-mini" data-action="pause-queue" data-id="${vm.id}">暂停任务</button>` : ''}
+      ${vm.managed && vm.task_queue_paused ? `<button class="btn btn-mini" data-action="resume-queue" data-id="${vm.id}">恢复任务</button>` : ''}
       ${userOwns(vm) ? `<button class="btn btn-mini" data-action="edit" data-id="${vm.id}">编辑</button>` : ''}
       ${userOwns(vm) ? `<button class="btn btn-mini btn-danger" data-action="delete" data-id="${vm.id}">删除</button>` : ''}
       ${allowAdminIp && vm.managed ? `<button class="btn btn-mini" data-action="admin-ip" data-id="${vm.id}">改IP</button>` : ''}
@@ -734,10 +755,12 @@ function renderTabs() {
   const adminVmsPanel = document.getElementById('admin-vms-panel')
   const adminSecurityGroupsPanel = document.getElementById('admin-security-groups-panel')
   const adminSshKeysPanel = document.getElementById('admin-ssh-keys-panel')
+  const adminMaintenancePanel = document.getElementById('admin-maintenance-panel')
   adminUsersPanel?.classList.toggle('active', state.adminTab === 'users')
   adminVmsPanel?.classList.toggle('active', state.adminTab === 'vms')
   adminSecurityGroupsPanel?.classList.toggle('active', state.adminTab === 'security-groups')
   adminSshKeysPanel?.classList.toggle('active', state.adminTab === 'ssh-keys')
+  adminMaintenancePanel?.classList.toggle('active', state.adminTab === 'maintenance')
 }
 
 function renderVmTable() {
@@ -1060,6 +1083,38 @@ function renderAdminSSHKeys() {
   `
 }
 
+function renderAdminMaintenance() {
+  if (!state.me?.is_admin) {
+    els.adminMaintenanceTable.innerHTML = `<div class="empty">管理员可见。</div>`
+    return
+  }
+  if (!state.maintenanceTasks.length) {
+    els.adminMaintenanceTable.innerHTML = `<div class="empty">没有维护任务。</div>`
+    return
+  }
+  els.adminMaintenanceTable.innerHTML = `
+    <table>
+      <thead><tr><th>Kind</th><th>Status</th><th>Payload</th><th>Error</th><th>Created</th><th>Updated</th></tr></thead>
+      <tbody>
+        ${state.maintenanceTasks
+          .map(
+            (task) => `
+              <tr>
+                <td class="strong">${escapeHtml(task.kind)}</td>
+                <td>${taskStatusBadge(task.status)}</td>
+                <td class="mono">${escapeHtml(JSON.stringify(task.payload, null, 2))}</td>
+                <td class="mono">${escapeHtml(task.error || '-')}</td>
+                <td>${escapeHtml(formatTime(task.created_at))}</td>
+                <td>${escapeHtml(formatTime(task.updated_at))}</td>
+              </tr>
+            `,
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `
+}
+
 function showDialog(dialog: HTMLDialogElement) {
   if (!dialog.open) dialog.showModal()
 }
@@ -1331,6 +1386,7 @@ function renderDetail(vm: VM) {
       <div><span class="label">Security Group</span><div>${escapeHtml(vm.security_group_name)}</div></div>
       <div><span class="label">Sync State</span><div>${statusBadge(vm.sync_state)}</div></div>
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
+      <div><span class="label">任务队列</span><div>${vm.task_queue_paused ? '<span class="badge warn">已暂停</span>' : '<span class="badge ok">运行中</span>'}</div></div>
       ${deleteInfo}
     </div>
     ${passwordBlock}
@@ -1345,6 +1401,13 @@ function renderDetail(vm: VM) {
     </div>
     <div class="detail-block">
       <h4>任务队列</h4>
+      <div class="detail-toolbar">
+        ${
+          vm.task_queue_paused
+            ? `<button type="button" class="btn btn-mini" data-task-action="resume-queue" data-vm-id="${vm.id}">恢复任务队列</button>`
+            : `<button type="button" class="btn btn-mini" data-task-action="pause-queue" data-vm-id="${vm.id}">暂停任务队列</button>`
+        }
+      </div>
       ${
       vm.tasks?.length
           ? `<div class="task-list">
@@ -1354,8 +1417,10 @@ function renderDetail(vm: VM) {
                   const error = task.error ? `<div class="task-error mono">${escapeHtml(task.error)}</div>` : ''
                   const taskActions =
                     task.status === 'failed'
-                      ? `<button type="button" class="btn btn-mini" data-task-action="retry" data-task-id="${task.id}">重试</button>`
-                      : ''
+                      ? `<button type="button" class="btn btn-mini" data-task-action="retry" data-task-id="${task.id}" data-vm-id="${vm.id}">重试</button>`
+                      : task.status === 'pending'
+                        ? `<button type="button" class="btn btn-mini" data-task-action="cancel" data-task-id="${task.id}" data-vm-id="${vm.id}">取消</button>`
+                        : ''
                   return `
                     <section class="task-item">
                       <div class="task-head">
@@ -1455,6 +1520,13 @@ async function loadAdminSSHKeys() {
   renderAdminSSHKeys()
 }
 
+async function loadAdminMaintenance() {
+  if (!state.me?.is_admin || state.maintenanceTasks.length) return
+  const data = await api<{ items: MaintenanceTask[] }>('/api/admin/maintenance-tasks')
+  state.maintenanceTasks = data.items
+  renderAdminMaintenance()
+}
+
 async function refreshVMViews() {
   await loadVMs()
   renderSummary()
@@ -1487,6 +1559,8 @@ async function loadActiveTab() {
         await loadAdminVMs()
       } else if (state.adminTab === 'security-groups') {
         await loadAdminSecurityGroups()
+      } else if (state.adminTab === 'maintenance') {
+        await loadAdminMaintenance()
       } else {
         await loadAdminSSHKeys()
       }
@@ -1783,7 +1857,7 @@ function bindEvents() {
   document.querySelectorAll<HTMLButtonElement>('[data-admin-tab]').forEach((button) => {
     button.addEventListener('click', async () => {
       const tab = button.dataset.adminTab
-      state.adminTab = tab === 'vms' || tab === 'security-groups' || tab === 'ssh-keys' ? tab : 'users'
+      state.adminTab = tab === 'vms' || tab === 'security-groups' || tab === 'ssh-keys' || tab === 'maintenance' ? tab : 'users'
       renderTabs()
       try {
         await loadActiveTab()
@@ -1872,11 +1946,38 @@ function bindEvents() {
     const taskAction = target.closest<HTMLElement>('[data-task-action]')
     if (taskAction) {
       const taskId = Number(taskAction.dataset.taskId)
-      const vmId = state.detailVmId
+      const vmId = Number(taskAction.dataset.vmId || state.detailVmId || 0)
       if (!vmId || !Number.isFinite(taskId) || taskId <= 0) return
       switch (taskAction.dataset.taskAction) {
         case 'retry':
           await retryVmTask(vmId, taskId)
+          break
+        case 'cancel':
+          try {
+            await api(`/api/vms/${vmId}/tasks/${taskId}/cancel`, { method: 'POST' })
+            flash('任务已取消。', 'ok')
+            await openDetailById(vmId)
+          } catch (err) {
+            flash((err as Error).message, 'error')
+          }
+          break
+        case 'pause-queue':
+          try {
+            await api(`/api/vms/${vmId}/tasks/pause`, { method: 'POST' })
+            flash('任务队列已暂停。', 'ok')
+            await openDetailById(vmId)
+          } catch (err) {
+            flash((err as Error).message, 'error')
+          }
+          break
+        case 'resume-queue':
+          try {
+            await api(`/api/vms/${vmId}/tasks/resume`, { method: 'POST' })
+            flash('任务队列已恢复。', 'ok')
+            await openDetailById(vmId)
+          } catch (err) {
+            flash((err as Error).message, 'error')
+          }
           break
       }
       return
@@ -1968,6 +2069,7 @@ async function init() {
       renderAdminVMs()
       renderAdminSecurityGroups()
       renderAdminSSHKeys()
+      renderAdminMaintenance()
     }
   } catch (err) {
     flash((err as Error).message, 'error')

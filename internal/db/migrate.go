@@ -234,6 +234,13 @@ CREATE INDEX IF NOT EXISTS idx_maintenance_tasks_kind_status_created
     ON maintenance_tasks(kind, status, created_at, id);
 `,
 	},
+	{
+		Version: 9,
+		Name:    "vm_task_queue_paused",
+		SQL: `
+ALTER TABLE vms ADD COLUMN task_queue_paused INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

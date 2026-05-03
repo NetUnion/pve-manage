@@ -75,6 +75,7 @@ type VM struct {
 	SecurityGroupName  string          `json:"security_group_name"`
 	UESTCRestricted    bool            `json:"uestc_restricted"`
 	Managed            bool            `json:"managed"`
+	TaskQueuePaused    bool            `json:"task_queue_paused"`
 	Config             json.RawMessage `json:"config"`
 	PreferStatus       json.RawMessage `json:"prefer_status"`
 	RealStatus         json.RawMessage `json:"real_status"`
@@ -145,6 +146,7 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 			SecurityGroupName:  vm.SecurityGroupName,
 			UESTCRestricted:    vm.UESTCRestricted,
 			Managed:            vm.Managed,
+			TaskQueuePaused:    vm.TaskQueuePaused,
 			Config:             vm.Config,
 			PreferStatus:       vm.PreferStatus,
 			RealStatus:         vm.RealStatus,
@@ -455,6 +457,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 			SecurityGroupName:  vm.SecurityGroupName,
 			UESTCRestricted:    vm.UESTCRestricted,
 			Managed:            vm.Managed,
+			TaskQueuePaused:    vm.TaskQueuePaused,
 			Config:             vm.Config,
 			PreferStatus:       vm.PreferStatus,
 			RealStatus:         vm.RealStatus,
@@ -1032,6 +1035,90 @@ func (s *Server) handleDeleteNowVM(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "delete_execute_after": nowStr})
 }
 
+func (s *Server) handlePauseVMTasks(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !current.IsAdmin && current.Username != vm.OwnerUsername {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot pause tasks")
+		return
+	}
+	now := timestamp()
+	if _, err := s.db.ExecContext(r.Context(), `
+		UPDATE vms
+		SET task_queue_paused = 1,
+		    updated_at = ?,
+		    version = version + 1
+		WHERE id = ?
+	`, now, id); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": true})
+}
+
+func (s *Server) handleResumeVMTasks(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !current.IsAdmin && current.Username != vm.OwnerUsername {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if !vm.Managed {
+		s.jsonError(w, http.StatusBadRequest, "unmanaged vm cannot resume tasks")
+		return
+	}
+	now := timestamp()
+	if _, err := s.db.ExecContext(r.Context(), `
+		UPDATE vms
+		SET task_queue_paused = 0,
+		    updated_at = ?,
+		    version = version + 1
+		WHERE id = ?
+	`, now, id); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "paused": false})
+}
+
 func (s *Server) handleRetryVMTask(w http.ResponseWriter, r *http.Request) {
 	current, err := s.currentUser(r)
 	if err != nil {
@@ -1113,6 +1200,72 @@ func (s *Server) handleRetryVMTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "requeued": true})
+}
+
+func (s *Server) handleCancelVMTask(w http.ResponseWriter, r *http.Request) {
+	current, err := s.currentUser(r)
+	if err != nil {
+		s.jsonError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	vmID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	taskID, err := strconv.ParseInt(chi.URLParam(r, "task_id"), 10, 64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid task id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), vmID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !current.IsAdmin && current.Username != vm.OwnerUsername {
+		s.jsonError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	task, err := s.loadVMTask(r.Context(), vmID, taskID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "task not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if task.Status != "pending" {
+		s.jsonError(w, http.StatusBadRequest, "only pending tasks can be canceled")
+		return
+	}
+	now := timestamp()
+	if _, err := s.db.ExecContext(r.Context(), `
+		UPDATE vm_tasks
+		SET status = 'canceled',
+		    updated_at = ?,
+		    finished_at = COALESCE(finished_at, ?)
+		WHERE id = ? AND vm_id = ? AND status = 'pending'
+	`, now, now, taskID, vmID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(), `
+		UPDATE vms
+		SET sync_error = NULL,
+		    updated_at = ?,
+		    version = version + 1
+		WHERE id = ?
+	`, now, vmID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "canceled": true})
 }
 
 func intFromOrZero(obj map[string]any, key string) int {

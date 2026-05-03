@@ -28,6 +28,7 @@ type VM struct {
 	SharedUsernamesJSON string
 	SecurityGroupName   string
 	UESTCRestricted     bool
+	TaskQueuePaused     bool
 	ConfigJSON          string
 	PreferStatusJSON    string
 	RealStatusJSON      string

@@ -73,7 +73,10 @@ func (s *Server) Handler() http.Handler {
 	r.Delete("/api/vms/{id}", s.handleDeleteVM)
 	r.Post("/api/vms/{id}/restore", s.handleRestoreVM)
 	r.Post("/api/vms/{id}/delete-now", s.handleDeleteNowVM)
+	r.Post("/api/vms/{id}/tasks/pause", s.handlePauseVMTasks)
+	r.Post("/api/vms/{id}/tasks/resume", s.handleResumeVMTasks)
 	r.Post("/api/vms/{id}/tasks/{task_id}/retry", s.handleRetryVMTask)
+	r.Post("/api/vms/{id}/tasks/{task_id}/cancel", s.handleCancelVMTask)
 	r.Get("/api/ssh-keys", s.handleListSSHKeys)
 	r.Post("/api/ssh-keys", s.handleCreateSSHKey)
 	r.Delete("/api/ssh-keys/{id}", s.handleDeleteSSHKey)
@@ -87,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/api/admin/users", s.handleAdminListUsers)
 	r.Get("/api/admin/security-groups", s.handleAdminListSecurityGroups)
 	r.Get("/api/admin/ssh-keys", s.handleAdminListSSHKeys)
+	r.Get("/api/admin/maintenance-tasks", s.handleAdminListMaintenanceTasks)
 	r.Patch("/api/admin/vms/{id}", s.handleAdminPatchVM)
 
 	return r

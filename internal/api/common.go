@@ -51,6 +51,7 @@ type vmSummary struct {
 	SecurityGroupName  string          `json:"security_group_name"`
 	UESTCRestricted    bool            `json:"uestc_restricted"`
 	Managed            bool            `json:"managed"`
+	TaskQueuePaused    bool            `json:"task_queue_paused"`
 	Config             json.RawMessage `json:"config"`
 	PreferStatus       json.RawMessage `json:"prefer_status"`
 	RealStatus         json.RawMessage `json:"real_status"`
@@ -68,6 +69,18 @@ type vmTaskSummary struct {
 	ID         int64           `json:"id"`
 	VMID       int64           `json:"vm_id"`
 	Seq        int             `json:"seq"`
+	Kind       string          `json:"kind"`
+	Payload    json.RawMessage `json:"payload"`
+	Status     string          `json:"status"`
+	Error      *string         `json:"error,omitempty"`
+	CreatedAt  string          `json:"created_at"`
+	UpdatedAt  string          `json:"updated_at"`
+	StartedAt  *string         `json:"started_at,omitempty"`
+	FinishedAt *string         `json:"finished_at,omitempty"`
+}
+
+type maintenanceTaskSummary struct {
+	ID         int64           `json:"id"`
 	Kind       string          `json:"kind"`
 	Payload    json.RawMessage `json:"payload"`
 	Status     string          `json:"status"`
@@ -186,6 +199,41 @@ func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, 
 		var startedAt sql.NullString
 		var finishedAt sql.NullString
 		if err := rows.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
+			return nil, err
+		}
+		item.Payload = rawJSONFromString(payloadRaw)
+		if startedAt.Valid {
+			value := startedAt.String
+			item.StartedAt = &value
+		}
+		if finishedAt.Valid {
+			value := finishedAt.String
+			item.FinishedAt = &value
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Server) loadMaintenanceTasks(ctx context.Context) ([]maintenanceTaskSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, kind, payload_json, status, error, created_at, updated_at, started_at, finished_at
+		FROM maintenance_tasks
+		ORDER BY id DESC
+		LIMIT 50
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]maintenanceTaskSummary, 0)
+	for rows.Next() {
+		var item maintenanceTaskSummary
+		var payloadRaw string
+		var startedAt sql.NullString
+		var finishedAt sql.NullString
+		if err := rows.Scan(&item.ID, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
 			return nil, err
 		}
 		item.Payload = rawJSONFromString(payloadRaw)
@@ -641,7 +689,7 @@ type vmRowQuerier interface {
 func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, password, sshkeys_json, shared_usernames_json,
-		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
+		       security_group_name, uestc_restricted, managed, task_queue_paused, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after
 		FROM vms
 		WHERE id = ?
@@ -666,6 +714,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 		&item.SecurityGroupName,
 		&item.UESTCRestricted,
 		&item.Managed,
+		&item.TaskQueuePaused,
 		&configRaw,
 		&preferRaw,
 		&realRaw,

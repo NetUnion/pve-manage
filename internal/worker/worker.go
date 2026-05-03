@@ -46,6 +46,7 @@ type vmRow struct {
 	RealStatusJSON      string
 	SyncState           string
 	Managed             bool
+	TaskQueuePaused     bool
 	Version             int
 	DeleteExecuteAfter  sql.NullString
 }
@@ -308,11 +309,12 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 			vt.id, vt.kind, vt.payload_json, vt.status, vt.seq, vt.started_at, vt.finished_at,
 			v.id, v.owner_username, v.cluster_key, v.vmid, v.vmname, v.ip, v.node, v.password, v.sshkeys_json, v.shared_usernames_json,
 			v.security_group_name, v.uestc_restricted, v.config_json, v.prefer_status_json, v.real_status_json,
-			v.sync_state, v.managed, v.version, v.delete_execute_after
+			v.sync_state, v.managed, v.task_queue_paused, v.version, v.delete_execute_after
 		FROM vm_tasks vt
 		JOIN vms v ON v.id = vt.vm_id
 		WHERE v.deleted_at IS NULL
 		  AND v.managed = 1
+		  AND v.task_queue_paused = 0
 		  AND (
 		    vt.status = 'pending'
 		    OR (vt.status = 'failed' AND vt.updated_at <= ?)
@@ -360,6 +362,7 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 			&current.VM.RealStatusJSON,
 			&current.VM.SyncState,
 			&current.VM.Managed,
+			&current.VM.TaskQueuePaused,
 			&current.VM.Version,
 			&current.VM.DeleteExecuteAfter,
 		); err != nil {
