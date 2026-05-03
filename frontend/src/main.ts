@@ -130,12 +130,13 @@ const state = {
   vms: [] as VM[],
   allVMs: [] as VM[],
   securityGroups: [] as SecurityGroup[],
+  adminSecurityGroups: [] as SecurityGroup[],
   sshKeys: [] as SSHKey[],
+  adminSSHKeys: [] as SSHKey[],
   templates: [] as Template[],
   users: [] as UserRow[],
   activeTab: 'vms',
-  adminTab: 'users',
-  vmFilter: '',
+  adminTab: 'users' as 'users' | 'vms' | 'security-groups' | 'ssh-keys',
   vmDialogMode: 'create' as 'create' | 'edit',
   vmDialogVm: null as VM | null,
   sgDialogMode: 'create' as 'create' | 'edit',
@@ -212,7 +213,6 @@ app.innerHTML = `
               <p>列出你拥有或共享管理的 VM。</p>
             </div>
             <div class="panel-actions">
-              <input id="vm-search" class="input" placeholder="搜索名称 / IP / owner" />
               <button id="create-vm-btn" class="btn btn-primary">新建 VM</button>
             </div>
           </div>
@@ -265,12 +265,20 @@ app.innerHTML = `
           <div class="subtabs">
             <button class="subtab active" data-admin-tab="users">Users</button>
             <button class="subtab" data-admin-tab="vms">All VMs</button>
+            <button class="subtab" data-admin-tab="security-groups">All Security Groups</button>
+            <button class="subtab" data-admin-tab="ssh-keys">All SSH Keys</button>
           </div>
           <div id="admin-users-panel" class="subpanel active">
             <div id="user-table" class="table-wrap"></div>
           </div>
           <div id="admin-vms-panel" class="subpanel">
             <div id="admin-vm-table" class="table-wrap"></div>
+          </div>
+          <div id="admin-security-groups-panel" class="subpanel">
+            <div id="admin-security-group-table" class="table-wrap"></div>
+          </div>
+          <div id="admin-ssh-keys-panel" class="subpanel">
+            <div id="admin-ssh-key-table" class="table-wrap"></div>
           </div>
         </section>
       </div>
@@ -416,7 +424,8 @@ const els = {
   templateTable: $('#template-table'),
   userTable: $('#user-table'),
   adminVmTable: $('#admin-vm-table'),
-  vmSearch: $('#vm-search'),
+  adminSecurityGroupTable: $('#admin-security-group-table'),
+  adminSshKeyTable: $('#admin-ssh-key-table'),
   createVmBtn: $('#create-vm-btn'),
   createSgBtn: $('#create-sg-btn'),
   tabs: Array.from(document.querySelectorAll<HTMLButtonElement>('.tab')),
@@ -670,16 +679,16 @@ function renderTabs() {
   })
   const adminUsersPanel = document.getElementById('admin-users-panel')
   const adminVmsPanel = document.getElementById('admin-vms-panel')
+  const adminSecurityGroupsPanel = document.getElementById('admin-security-groups-panel')
+  const adminSshKeysPanel = document.getElementById('admin-ssh-keys-panel')
   adminUsersPanel?.classList.toggle('active', state.adminTab === 'users')
   adminVmsPanel?.classList.toggle('active', state.adminTab === 'vms')
+  adminSecurityGroupsPanel?.classList.toggle('active', state.adminTab === 'security-groups')
+  adminSshKeysPanel?.classList.toggle('active', state.adminTab === 'ssh-keys')
 }
 
 function renderVmTable() {
-  const filtered = state.vms.filter((vm) => vm.managed).filter((vm) => {
-    if (!state.vmFilter) return true
-    const target = `${vm.vmname} ${vm.ip} ${vm.node ?? ''} ${vm.owner_username} ${vm.cluster_key} ${vm.security_group_name}`.toLowerCase()
-    return target.includes(state.vmFilter.toLowerCase())
-  })
+  const filtered = state.vms.filter((vm) => vm.managed)
   if (!filtered.length) {
     els.vmTable.innerHTML = `<div class="empty">没有匹配的 VM。</div>`
     return
@@ -927,6 +936,68 @@ function renderAdminVMs() {
                 <td>
                   ${rowActions(vm, true)}
                 </td>
+              </tr>
+            `,
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `
+}
+
+function renderAdminSecurityGroups() {
+  if (!state.me?.is_admin) {
+    els.adminSecurityGroupTable.innerHTML = `<div class="empty">管理员可见。</div>`
+    return
+  }
+  if (!state.adminSecurityGroups.length) {
+    els.adminSecurityGroupTable.innerHTML = `<div class="empty">没有安全组。</div>`
+    return
+  }
+  els.adminSecurityGroupTable.innerHTML = `
+    <table>
+      <thead><tr><th>Name</th><th>Owner</th><th>Input</th><th>Output</th><th>Rules</th><th>Updated</th></tr></thead>
+      <tbody>
+        ${state.adminSecurityGroups
+          .map(
+            (sg) => `
+              <tr>
+                <td class="strong">${escapeHtml(sg.name)}</td>
+                <td>${escapeHtml(sg.owner_username)}</td>
+                <td>${escapeHtml(normalizeSgPolicy(sg.policy_in))}</td>
+                <td>${escapeHtml(normalizeSgPolicy(sg.policy_out))}</td>
+                <td>${sg.rules.length}</td>
+                <td>${escapeHtml(formatTime(sg.updated_at))}</td>
+              </tr>
+            `,
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `
+}
+
+function renderAdminSSHKeys() {
+  if (!state.me?.is_admin) {
+    els.adminSshKeyTable.innerHTML = `<div class="empty">管理员可见。</div>`
+    return
+  }
+  if (!state.adminSSHKeys.length) {
+    els.adminSshKeyTable.innerHTML = `<div class="empty">没有 SSH Key。</div>`
+    return
+  }
+  els.adminSshKeyTable.innerHTML = `
+    <table>
+      <thead><tr><th>Name</th><th>Owner</th><th>Public Key</th><th>Updated</th></tr></thead>
+      <tbody>
+        ${state.adminSSHKeys
+          .map(
+            (key) => `
+              <tr>
+                <td class="strong">${escapeHtml(key.name)}</td>
+                <td>${escapeHtml(key.owner_username)}</td>
+                <td class="mono">${escapeHtml(shortKey(key.public_key))}</td>
+                <td>${escapeHtml(formatTime(key.updated_at))}</td>
               </tr>
             `,
           )
@@ -1280,6 +1351,20 @@ async function loadAdminVMs() {
   renderAdminVMs()
 }
 
+async function loadAdminSecurityGroups() {
+  if (!state.me?.is_admin || state.adminSecurityGroups.length) return
+  const data = await api<{ items: SecurityGroup[] }>('/api/admin/security-groups')
+  state.adminSecurityGroups = data.items
+  renderAdminSecurityGroups()
+}
+
+async function loadAdminSSHKeys() {
+  if (!state.me?.is_admin || state.adminSSHKeys.length) return
+  const data = await api<{ items: SSHKey[] }>('/api/admin/ssh-keys')
+  state.adminSSHKeys = data.items
+  renderAdminSSHKeys()
+}
+
 async function refreshVMViews() {
   await loadVMs()
   renderSummary()
@@ -1305,11 +1390,15 @@ async function loadActiveTab() {
     case 'templates':
       await loadTemplates()
       break
-    case 'admin':
+  case 'admin':
       if (state.adminTab === 'users') {
         await loadAdminUsers()
-      } else {
+      } else if (state.adminTab === 'vms') {
         await loadAdminVMs()
+      } else if (state.adminTab === 'security-groups') {
+        await loadAdminSecurityGroups()
+      } else {
+        await loadAdminSSHKeys()
       }
       break
   }
@@ -1569,7 +1658,8 @@ function bindEvents() {
   })
   document.querySelectorAll<HTMLButtonElement>('[data-admin-tab]').forEach((button) => {
     button.addEventListener('click', async () => {
-      state.adminTab = button.dataset.adminTab === 'vms' ? 'vms' : 'users'
+      const tab = button.dataset.adminTab
+      state.adminTab = tab === 'vms' || tab === 'security-groups' || tab === 'ssh-keys' ? tab : 'users'
       renderTabs()
       try {
         await loadActiveTab()
@@ -1577,10 +1667,6 @@ function bindEvents() {
         flash((err as Error).message, 'error')
       }
     })
-  })
-  els.vmSearch.addEventListener('input', () => {
-    state.vmFilter = els.vmSearch.value
-    renderVmTable()
   })
   els.createVmBtn.addEventListener('click', async () => {
     try {
@@ -1743,6 +1829,8 @@ async function init() {
       renderTemplates()
       renderUsers()
       renderAdminVMs()
+      renderAdminSecurityGroups()
+      renderAdminSSHKeys()
     }
   } catch (err) {
     flash((err as Error).message, 'error')

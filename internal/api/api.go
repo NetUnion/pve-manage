@@ -84,6 +84,8 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/api/templates", s.handleListTemplates)
 	r.Get("/api/admin/vms", s.handleAdminListVMs)
 	r.Get("/api/admin/users", s.handleAdminListUsers)
+	r.Get("/api/admin/security-groups", s.handleAdminListSecurityGroups)
+	r.Get("/api/admin/ssh-keys", s.handleAdminListSSHKeys)
 	r.Patch("/api/admin/vms/{id}", s.handleAdminPatchVM)
 
 	return r

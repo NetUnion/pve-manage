@@ -99,6 +99,66 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) handleAdminListSecurityGroups(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireAdmin(r); err != nil {
+		s.jsonError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
+		FROM security_groups
+		ORDER BY owner_username, name
+	`)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	items := make([]securityGroupSummary, 0)
+	for rows.Next() {
+		var item securityGroupSummary
+		var rulesRaw string
+		if err := rows.Scan(&item.ID, &item.OwnerUsername, &item.Name, &rulesRaw, &item.PolicyIn, &item.PolicyOut, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		item.PolicyIn = normalizeFirewallPolicyDisplay(item.PolicyIn)
+		item.PolicyOut = normalizeFirewallPolicyDisplay(item.PolicyOut)
+		item.Rules = rawJSONFromString(rulesRaw)
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleAdminListSSHKeys(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireAdmin(r); err != nil {
+		s.jsonError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT id, owner_username, name, public_key, created_at, updated_at
+		FROM ssh_keys
+		ORDER BY owner_username, name, id
+	`)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	items := make([]sshKeySummary, 0)
+	for rows.Next() {
+		var item sshKeySummary
+		if err := rows.Scan(&item.ID, &item.OwnerUsername, &item.Name, &item.PublicKey, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		items = append(items, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 type adminPatchVMRequest struct {
 	IP string `json:"ip"`
 }
