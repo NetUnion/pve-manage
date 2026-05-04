@@ -3075,15 +3075,15 @@ async function init() {
       }
       await loadActiveTab()
     } else {
+      state.activeTab = 'vms'
+      state.adminTab = 'users'
+      state.detailVmId = null
       els.summary.innerHTML = ''
       renderVmTable()
       renderSecurityGroups()
       renderTemplates()
+      document.querySelectorAll<HTMLElement>('.admin-only').forEach((el) => (el.hidden = true))
       renderUsers()
-      renderAdminVMs()
-      renderAdminSecurityGroups()
-      renderAdminSSHKeys()
-      renderAdminMaintenance()
     }
   } catch (err) {
     flash((err as Error).message, 'error')
