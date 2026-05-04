@@ -1300,9 +1300,12 @@ function renderVmLimitHint() {
   const editBonusMemory = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'memory_gb', 0) : 0
   const editBonusDisk = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'disk_gb', 0) : 0
   const editBonusCount = state.vmDialogMode === 'edit' && selectedVM ? 1 : 0
-  const cpuLimit = quotaExempt ? 0 : Math.max(0, Math.min(cpu?.limit ?? 0, quotaCPU + editBonusCPU))
-  const memoryLimit = quotaExempt ? 0 : Math.max(0, Math.min(cpu?.memory_limit ?? cpu?.limit ?? 0, quotaMemory + editBonusMemory))
-  const diskLimit = quotaExempt ? 0 : Math.max(0, Math.min(storage?.limit ?? 0, quotaStorage + editBonusDisk))
+  const clusterCpuLimit = cpu?.limit ?? 0
+  const clusterMemoryLimit = cpu?.memory_limit ?? cpu?.limit ?? 0
+  const clusterDiskLimit = storage?.limit ?? 0
+  const cpuLimit = quotaExempt ? clusterCpuLimit : Math.max(0, Math.min(clusterCpuLimit, quotaCPU + editBonusCPU))
+  const memoryLimit = quotaExempt ? clusterMemoryLimit : Math.max(0, Math.min(clusterMemoryLimit, quotaMemory + editBonusMemory))
+  const diskLimit = quotaExempt ? clusterDiskLimit : Math.max(0, Math.min(clusterDiskLimit, quotaStorage + editBonusDisk))
   const countLimit = Math.max(0, quotaCount + editBonusCount)
   const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
   const quotaOwnerName = state.vmDialogAdminScope ? (els.vmOwner.value.trim() || (state.vmDialogVm?.owner_username ?? '目标 owner')) : (state.me?.username ?? '当前用户')
@@ -1793,6 +1796,10 @@ function currentCluster(): ClusterOption | undefined {
   return state.options?.clusters.find((cluster) => cluster.key === els.vmCluster.value) ?? state.options?.clusters[0]
 }
 
+function canUseVmQuotaExempt(): boolean {
+  return Boolean(state.me?.is_admin && state.activeTab === 'admin' && state.adminTab === 'vms' && state.vmDialogMode !== 'create')
+}
+
 function renderVmFormOptions() {
   const opts = state.options?.clusters ?? []
   const previousCluster = els.vmCluster.value || opts[0]?.key || ''
@@ -1898,7 +1905,8 @@ function renderVmFormOptions() {
     els.vmUESTC.disabled = network.uestc === 'force'
   }
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
-  els.vmQuotaExemptRow.toggleAttribute('hidden', !(state.vmDialogAdminScope && state.vmDialogMode !== 'create'))
+  const showQuotaExempt = canUseVmQuotaExempt()
+  els.vmQuotaExemptRow.toggleAttribute('hidden', !showQuotaExempt)
   els.vmIpRow.classList.toggle('hidden', !isAdopt)
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
@@ -2668,7 +2676,7 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
     if (owner && owner !== vm.owner_username) {
       payload.owner_username = owner
     }
-    if (state.vmDialogAdminScope) {
+    if (canUseVmQuotaExempt()) {
       payload.quota_exempt = els.vmQuotaExempt.checked
     }
   }
@@ -2696,7 +2704,7 @@ function buildAdoptVmPayload(): Record<string, unknown> {
     security_group_owner: securityGroupOwner,
     security_group_name: securityGroupName,
     uestc_restricted: els.vmUESTC.checked,
-    quota_exempt: state.vmDialogAdminScope ? els.vmQuotaExempt.checked : false,
+    quota_exempt: canUseVmQuotaExempt() ? els.vmQuotaExempt.checked : false,
   }
 }
 
