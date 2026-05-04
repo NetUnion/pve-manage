@@ -267,6 +267,15 @@ WHERE managed = 1
   AND vmname LIKE owner_username || '-%';
 `,
 	},
+	{
+		Version: 13,
+		Name:    "backfill_target_node",
+		SQL: `
+UPDATE vms
+SET target_node = COALESCE(NULLIF(TRIM(target_node), ''), NULLIF(TRIM(node), ''))
+WHERE target_node IS NULL OR TRIM(target_node) = '';
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

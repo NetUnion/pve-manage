@@ -1299,9 +1299,9 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 		cfgJSON, _ := json.Marshal(cfg)
 		_, err = w.db.ExecContext(ctx, `
 			UPDATE vms
-			SET vmname = ?, ip = ?, node = ?, config_json = ?, real_status_json = ?, sync_state = 'unmanaged', sync_error = NULL, updated_at = ?
+			SET vmname = ?, ip = ?, node = ?, target_node = ?, config_json = ?, real_status_json = ?, sync_state = 'unmanaged', sync_error = NULL, updated_at = ?
 			WHERE id = ?
-		`, name, stringFromMap(cfg, "ip", ""), resource.Node, string(cfgJSON), string(real), now, id)
+		`, name, stringFromMap(cfg, "ip", ""), resource.Node, resource.Node, string(cfgJSON), string(real), now, id)
 		return err
 	}
 
@@ -1311,12 +1311,12 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 	})
 	_, err = w.db.ExecContext(ctx, `
 		INSERT INTO vms(
-			owner_username, cluster_key, vmid, vmname, ip, node, password,
+			owner_username, cluster_key, vmid, vmname, ip, node, target_node, password,
 			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
 			config_json, prefer_status_json, real_status_json, sync_state, version,
 			created_at, updated_at, managed
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		`, "__pve_unmanaged__", clusterKey, resource.VMID, name, stringFromMap(cfg, "ip", ""), resource.Node, "", "[]", "[]", "", 0, string(cfgJSON), string(prefer), string(real), "unmanaged", 1, now, now, 0)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		`, "__pve_unmanaged__", clusterKey, resource.VMID, name, stringFromMap(cfg, "ip", ""), resource.Node, resource.Node, "", "[]", "[]", "", 0, string(cfgJSON), string(prefer), string(real), "unmanaged", 1, now, now, 0)
 	return err
 }
 
