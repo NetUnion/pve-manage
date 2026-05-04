@@ -117,12 +117,36 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		quota := s.effectiveQuota(&user)
+		count, cpu, memory, storage, err := s.listUserVMUsage(r.Context(), user.Username)
+		if err != nil {
+			count, cpu, memory, storage = 0, 0, 0, 0
+		}
+		sgCount, err := s.countUserSecurityGroups(r.Context(), user.Username)
+		if err != nil {
+			sgCount = 0
+		}
 		items = append(items, userEnvelope{
 			Username: user.Username,
 			Email:    user.Email,
 			Name:     user.Name,
 			Groups:   parseJSONStrings(user.GroupsJSON),
 			IsAdmin:  user.IsAdmin,
+			Quota: quotaEnvelope{
+				Number:        quota.Number,
+				CPU:           quota.CPU,
+				Memory:        quota.Memory,
+				Storage:       quota.Storage,
+				SecurityGroup: quota.SecurityGroup,
+				UESTC:         quota.UESTC,
+			},
+			Usage: usageEnvelope{
+				Count:         count,
+				CPU:           cpu,
+				Memory:        memory,
+				Storage:       storage,
+				SecurityGroup: sgCount,
+			},
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})

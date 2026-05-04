@@ -209,6 +209,8 @@ type UserRow = {
   name: string
   groups: string[]
   is_admin: boolean
+  quota?: Me['quota']
+  usage?: Me['usage']
 }
 
 const state = {
@@ -870,11 +872,23 @@ function configNumber(config: Record<string, unknown>, key: string, fallback = 0
   return fallback
 }
 
-function remainingQuotaValue(kind: keyof NonNullable<Me['quota']>, usageKind: keyof NonNullable<Me['usage']>): number {
-  const quota = state.me?.quota?.[kind]
-  const usage = state.me?.usage?.[usageKind]
+function remainingQuotaValue(source: { quota?: Me['quota']; usage?: Me['usage'] } | null | undefined, kind: keyof NonNullable<Me['quota']>, usageKind: keyof NonNullable<Me['usage']>): number {
+  const quota = source?.quota?.[kind]
+  const usage = source?.usage?.[usageKind]
   if (typeof quota !== 'number' || typeof usage !== 'number') return 0
   return Math.max(0, quota - usage)
+}
+
+function quotaContextUser(): { quota?: Me['quota']; usage?: Me['usage'] } | null {
+  if (!state.vmDialogAdminScope) return state.me
+  const owner = els.vmOwner.value.trim()
+  if (owner) {
+    return state.users.find((user) => user.username === owner) ?? state.me
+  }
+  if (state.vmDialogMode === 'edit' && state.vmDialogVm) {
+    return state.users.find((user) => user.username === state.vmDialogVm.owner_username) ?? state.me
+  }
+  return state.me
 }
 
 function taskKindLabel(kind: string): string {
@@ -1276,10 +1290,11 @@ function renderVmLimitHint() {
   const cpu = cluster.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster.cpu[0]
   const storage = cluster.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster.storage[0]
   const quotaExempt = Boolean(state.vmDialogAdminScope && els.vmQuotaExempt.checked)
-  const quotaCPU = remainingQuotaValue('cpu', 'cpu')
-  const quotaMemory = remainingQuotaValue('memory', 'memory')
-  const quotaStorage = remainingQuotaValue('storage', 'storage')
-  const quotaCount = remainingQuotaValue('number', 'count')
+  const quotaOwner = quotaContextUser()
+  const quotaCPU = remainingQuotaValue(quotaOwner, 'cpu', 'cpu')
+  const quotaMemory = remainingQuotaValue(quotaOwner, 'memory', 'memory')
+  const quotaStorage = remainingQuotaValue(quotaOwner, 'storage', 'storage')
+  const quotaCount = remainingQuotaValue(quotaOwner, 'number', 'count')
   const selectedVM = state.vmDialogVm
   const editBonusCPU = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'cpu_cores', 0) : 0
   const editBonusMemory = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'memory_gb', 0) : 0
@@ -1290,9 +1305,11 @@ function renderVmLimitHint() {
   const diskLimit = quotaExempt ? 0 : Math.max(0, Math.min(storage?.limit ?? 0, quotaStorage + editBonusDisk))
   const countLimit = Math.max(0, quotaCount + editBonusCount)
   const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
+  const quotaOwnerName = state.vmDialogAdminScope ? (els.vmOwner.value.trim() || (state.vmDialogVm?.owner_username ?? '目标 owner')) : (state.me?.username ?? '当前用户')
   els.vmLimitHint.innerHTML = `
     <div class="limit-hint-title">可选范围</div>
     <div class="limit-hint-grid">
+      <span>配额主体 ${escapeHtml(quotaOwnerName)}</span>
       <span>CPU 核数 1 - ${cpuLimit || '-'}</span>
       <span>内存 GB 1 - ${memoryLimit || '-'}</span>
       <span>磁盘 GB 20 - ${diskLimit || '-'}</span>
@@ -1881,7 +1898,7 @@ function renderVmFormOptions() {
     els.vmUESTC.disabled = network.uestc === 'force'
   }
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
-  els.vmQuotaExemptRow.classList.toggle('hidden', !state.vmDialogAdminScope)
+  els.vmQuotaExemptRow.classList.toggle('hidden', !(state.vmDialogAdminScope && state.vmDialogMode !== 'create'))
   els.vmIpRow.classList.toggle('hidden', !isAdopt)
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
@@ -2596,11 +2613,11 @@ function startVmAutoRefresh() {
 async function prepareVmDialogData(mode: 'create' | 'edit' | 'adopt') {
   await loadOptions()
   if (state.vmDialogAdminScope && state.me?.is_admin && (mode === 'adopt' || mode === 'edit')) {
-    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadAdminSSHKeys()])
+    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadAdminSSHKeys(), loadAdminUsers()])
   } else if (mode === 'adopt' && state.me?.is_admin) {
-    await Promise.all([loadAdminSecurityGroups(), loadSSHKeys()])
+    await Promise.all([loadAdminSecurityGroups(), loadSSHKeys(), loadAdminUsers()])
   } else if (mode === 'edit' && state.me?.is_admin) {
-    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadSSHKeys()])
+    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadSSHKeys(), loadAdminUsers()])
   } else {
     await Promise.all([loadSecurityGroups(), loadSSHKeys(), loadTemplates()])
   }
@@ -2930,6 +2947,7 @@ function bindEvents() {
   els.createVmBtn.addEventListener('click', async () => {
     try {
       state.vmDialogVm = null
+      state.vmDialogAdminScope = false
       await prepareVmDialogData('create')
       openVmDialog('create')
     } catch (err) {
