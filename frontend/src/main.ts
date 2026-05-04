@@ -232,8 +232,8 @@ if (!app) {
 app.innerHTML = `
   <header class="topbar">
     <div class="brand">
-      <div class="brand-title">Cloud Manage</div>
-      <div class="brand-subtitle">PVE 虚拟机控制台</div>
+      <div class="brand-title">NetUnion & CNSS Cloud</div>
+      <div class="brand-subtitle">虚拟机控制台</div>
     </div>
     <div class="topbar-actions">
       <div id="me-chip" class="me-chip">未登录</div>
