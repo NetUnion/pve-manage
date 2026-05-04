@@ -68,6 +68,7 @@ cloud-manage migrate
    - 模板池
    - 节点负载
    - 所有 VM 库存
+   - 已从 PVE 消失的 unmanaged VM 会被软删除，避免 All VMs 残留不存在的机器
    - VM 指标历史
 
 ## 状态模型

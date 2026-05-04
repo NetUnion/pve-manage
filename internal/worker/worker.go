@@ -578,16 +578,25 @@ func (w *Worker) syncUnmanagedVMs(ctx context.Context) error {
 			return fmt.Errorf("cluster %s: %w", clusterKey, err)
 		}
 		count := 0
+		seenVMIDs := make([]int, 0, len(resources))
 		for _, resource := range resources {
 			if resource.Type != "qemu" || resource.VMID <= 0 {
 				continue
 			}
+			seenVMIDs = append(seenVMIDs, resource.VMID)
 			if err := w.upsertUnmanagedVM(ctx, clusterKey, resource, now); err != nil {
 				return err
 			}
 			count++
 		}
+		removed, err := w.markMissingUnmanagedVMsDeleted(ctx, clusterKey, seenVMIDs, now)
+		if err != nil {
+			return err
+		}
 		w.logger.InfoContext(ctx, "existing pve vms scanned", "cluster", clusterKey, "count", count)
+		if removed > 0 {
+			w.logger.InfoContext(ctx, "missing unmanaged pve vms marked deleted", "cluster", clusterKey, "count", removed)
+		}
 	}
 	return nil
 }
@@ -1356,6 +1365,67 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		`, "__pve_unmanaged__", clusterKey, resource.VMID, name, stringFromMap(cfg, "ip", ""), resource.Node, resource.Node, "", "[]", "[]", "", 0, string(cfgJSON), string(prefer), string(real), "unmanaged", 1, now, now, 0)
 	return err
+}
+
+func (w *Worker) markMissingUnmanagedVMsDeleted(ctx context.Context, clusterKey string, seenVMIDs []int, now string) (int64, error) {
+	seen := make(map[int]struct{}, len(seenVMIDs))
+	for _, vmid := range seenVMIDs {
+		seen[vmid] = struct{}{}
+	}
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT id, vmid, real_status_json
+		FROM vms
+		WHERE cluster_key = ?
+		  AND managed = 0
+		  AND deleted_at IS NULL
+	`, clusterKey)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	type missingVM struct {
+		id      int64
+		vmid    int
+		realRaw string
+	}
+	missing := make([]missingVM, 0)
+	for rows.Next() {
+		var vm missingVM
+		if err := rows.Scan(&vm.id, &vm.vmid, &vm.realRaw); err != nil {
+			return 0, err
+		}
+		if _, ok := seen[vm.vmid]; ok {
+			continue
+		}
+		missing = append(missing, vm)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, vm := range missing {
+		real := map[string]any{}
+		_ = json.Unmarshal([]byte(vm.realRaw), &real)
+		real["intent"] = "unmanaged_deleted"
+		real["power"] = "deleted"
+		real["last_seen_missing_at"] = now
+		real["last_synced_at"] = now
+		data, _ := json.Marshal(real)
+		if _, err := w.db.ExecContext(ctx, `
+			UPDATE vms
+			SET deleted_at = ?,
+			    real_status_json = ?,
+			    sync_state = 'synced',
+			    sync_error = NULL,
+			    updated_at = ?
+			WHERE id = ?
+			  AND managed = 0
+			  AND deleted_at IS NULL
+		`, now, string(data), now, vm.id); err != nil {
+			return 0, err
+		}
+	}
+	return int64(len(missing)), nil
 }
 
 func (w *Worker) markSynced(ctx context.Context, id int64, real map[string]any) error {
