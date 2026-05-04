@@ -764,6 +764,8 @@ func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]an
 
 func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map[string]any, bridgeKey string, bridge config.BridgeConfig, cfg map[string]any, node string) error {
 	params := url.Values{}
+	var passwordChanged bool
+	configState := parseJSONMap(vm.ConfigJSON)
 	desiredName := prefixedVMName(vm.OwnerUsername, vm.VMName)
 	if stringFromMap(cfg, "name", "") != desiredName {
 		params.Set("name", desiredName)
@@ -777,8 +779,9 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 	if stringFromMap(cfg, "ciuser", "") != "root" {
 		params.Set("ciuser", "root")
 	}
-	if stringFromMap(cfg, "cipassword", "") != vm.Password {
+	if !boolFrom(configState, "password_synced") {
 		params.Set("cipassword", vm.Password)
+		passwordChanged = true
 	}
 	if stringFromMap(cfg, "ipconfig0", "") != fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway) {
 		params.Set("ipconfig0", fmt.Sprintf("ip=%s,gw=%s,ip6=auto", vm.IP, bridge.IPv4.Gateway))
@@ -796,7 +799,11 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 		return fmt.Errorf("invalid ssh key list: %w", err)
 	}
 	desiredSSH := strings.Join(sshKeys, "\n")
-	if stringFromMap(cfg, "sshkeys", "") != desiredSSH {
+	currentSSH, err := canonicalSSHKeysConfigValue(stringFromMap(cfg, "sshkeys", ""))
+	if err != nil {
+		return fmt.Errorf("invalid pve ssh key config: %w", err)
+	}
+	if currentSSH != desiredSSH {
 		if desiredSSH == "" {
 			params.Set("delete", "sshkeys")
 		} else {
@@ -814,7 +821,13 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 	if len(params) == 0 {
 		return nil
 	}
-	return w.pve.SetVMConfig(ctx, vm.ClusterKey, node, vm.VMID, params)
+	if err := w.pve.SetVMConfig(ctx, vm.ClusterKey, node, vm.VMID, params); err != nil {
+		return err
+	}
+	if passwordChanged {
+		return w.markPasswordSynced(ctx, vm.ID)
+	}
+	return nil
 }
 
 func normalizeSSHKeyList(values []string) ([]string, error) {
@@ -854,6 +867,32 @@ func normalizeSSHKeyLine(value string) (string, error) {
 	return line, nil
 }
 
+func canonicalSSHKeysConfigValue(raw string) (string, error) {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\r", ""))
+	if raw == "" {
+		return "", nil
+	}
+	lines := strings.Split(raw, "\n")
+	values := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, err := normalizeSSHKeyLine(line); err != nil && strings.Contains(line, "%") {
+			if decoded, decErr := url.QueryUnescape(line); decErr == nil {
+				line = decoded
+			}
+		}
+		values = append(values, line)
+	}
+	normalized, err := normalizeSSHKeyList(values)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(normalized, "\n"), nil
+}
+
 func encodePVESSHKeys(value string) string {
 	// PVE expects the sshkeys parameter value to be rawurlencoded, while the
 	// HTTP client still applies the outer x-www-form-urlencoded encoding.
@@ -862,6 +901,17 @@ func encodePVESSHKeys(value string) string {
 
 func strictPercentEscape(value string) string {
 	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
+
+func parseJSONMap(raw string) map[string]any {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(raw), &out); err != nil || out == nil {
+		return map[string]any{}
+	}
+	return out
 }
 
 func normalizeBootOrder(value string) string {
@@ -1433,6 +1483,29 @@ func (w *Worker) markSynced(ctx context.Context, id int64, real map[string]any) 
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vms
 		SET real_status_json = ?, sync_state = 'synced', sync_error = NULL, updated_at = ?
+		WHERE id = ?
+	`, string(data), timestamp(), id)
+	return err
+}
+
+func (w *Worker) markPasswordSynced(ctx context.Context, id int64) error {
+	var raw string
+	if err := w.db.QueryRowContext(ctx, `
+		SELECT config_json
+		FROM vms
+		WHERE id = ?
+	`, id).Scan(&raw); err != nil {
+		return err
+	}
+	cfg := parseJSONMap(raw)
+	cfg["password_synced"] = true
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = w.db.ExecContext(ctx, `
+		UPDATE vms
+		SET config_json = ?, updated_at = ?
 		WHERE id = ?
 	`, string(data), timestamp(), id)
 	return err

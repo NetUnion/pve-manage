@@ -478,6 +478,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		"security_group_name": req.SecurityGroupName,
 		"uestc_restricted":    chooseUESTC,
 		"boot_order":          bootOrder,
+		"password_synced":     false,
 	})
 	realJSON, _ := json.Marshal(map[string]any{
 		"intent":         "present",
@@ -707,6 +708,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		vm.Password = password
+		cfg["password_synced"] = false
 		rebootNeeded = true
 		changed = true
 	}
@@ -1645,6 +1647,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		"uestc_restricted":     uestcRestricted,
 		"quota_exempt":         false,
 		"boot_order":           bootOrder,
+		"password_synced":      false,
 		"power":                req.Power,
 		"root_user":            "root",
 	})
@@ -1668,6 +1671,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		"uestc_restricted":     uestcRestricted,
 		"quota_exempt":         false,
 		"boot_order":           bootOrder,
+		"password_synced":      false,
 	})
 	realJSON := vm.RealStatus
 	if len(realJSON) == 0 {
