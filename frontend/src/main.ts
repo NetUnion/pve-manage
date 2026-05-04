@@ -274,7 +274,7 @@ app.innerHTML = `
               <span class="menu-title">Templates</span>
               <span class="menu-subtitle">模板</span>
             </button>
-            <button class="tab admin-only" data-tab="admin">
+            <button class="tab admin-only" hidden data-tab="admin">
               <span class="menu-title">Admin</span>
               <span class="menu-subtitle">管理</span>
             </button>
@@ -349,7 +349,7 @@ app.innerHTML = `
           <div id="template-table" class="table-wrap"></div>
         </section>
 
-        <section id="tab-admin" class="tab-panel">
+        <section id="tab-admin" class="tab-panel admin-only" hidden>
           <div class="panel-head">
             <div>
               <h2>Admin</h2>
@@ -932,13 +932,11 @@ function renderSummary() {
   const pending = state.vms.filter((vm) => vm.sync_state === 'pending' || vm.sync_state === 'syncing').length
   const failed = state.vms.filter((vm) => vm.sync_state === 'failed').length
   const deleting = state.vms.filter(isDeletePending).length
-  const admin = state.me?.is_admin ? '管理员' : '普通用户'
   els.summary.innerHTML = `
     <span class="stat">VM ${total}</span>
     <span class="stat">待同步 ${pending}</span>
     <span class="stat">失败 ${failed}</span>
     <span class="stat">待删除 ${deleting}</span>
-    <span class="stat">${admin}</span>
   `
 }
 
@@ -991,6 +989,12 @@ function applyRoute(pathname: string): boolean {
 
   const adminMatch = path.match(/^\/admin(?:\/(users|vms|security-groups|ssh-keys|maintenance))?$/)
   if (adminMatch) {
+    if (state.me && !state.me.is_admin) {
+      state.activeTab = 'vms'
+      state.detailVmId = null
+      state.adminTab = 'users'
+      return false
+    }
     state.activeTab = 'admin'
     state.adminTab = (adminMatch[1] as AdminTab | undefined) ?? 'users'
     return true
@@ -3060,6 +3064,9 @@ async function init() {
   bindEvents()
   try {
     await loadMe()
+    if (!state.me?.is_admin && /^\/admin(?:\/|$)/.test(window.location.pathname)) {
+      history.replaceState({}, '', '/vms')
+    }
     if (state.me) {
       await loadOptions()
       const validRoute = applyRoute(window.location.pathname)
