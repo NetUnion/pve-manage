@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,6 +61,14 @@ func (s *Server) Handler() http.Handler {
 	r.Handle("/assets/*", s.webui)
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") {
+			http.NotFound(w, r)
+			return
+		}
+		if filepath.Ext(r.URL.Path) != "" {
+			if s.webui != nil {
+				s.webui.ServeHTTP(w, r)
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}
