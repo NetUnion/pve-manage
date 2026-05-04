@@ -820,7 +820,11 @@ func normalizeSSHKeyLine(value string) (string, error) {
 func doubleURLEncodePath(value string) string {
 	// PVE's sshkeys field expects the key material itself to be URL-encoded
 	// before the outer form encoding happens, so we intentionally escape twice.
-	return url.PathEscape(url.PathEscape(value))
+	return strictPercentEscape(strictPercentEscape(value))
+}
+
+func strictPercentEscape(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
 }
 
 func normalizeBootOrder(value string) string {
