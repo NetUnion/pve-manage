@@ -126,12 +126,17 @@ func (c *Client) ensureVMIPSet(ctx context.Context, clusterKey, node string, vmi
 	}
 	have := make(map[string]struct{}, len(current))
 	for _, entry := range current {
+		if entry.CIDR == "" {
+			continue
+		}
 		have[entry.CIDR] = struct{}{}
 	}
+	want := make(map[string]struct{}, len(entries))
 	for _, cidr := range entries {
 		if cidr == "" {
 			continue
 		}
+		want[cidr] = struct{}{}
 		if _, ok := have[cidr]; ok {
 			continue
 		}
@@ -139,6 +144,14 @@ func (c *Client) ensureVMIPSet(ctx context.Context, clusterKey, node string, vmi
 			if isAlreadyExistsErr(err) {
 				continue
 			}
+			return err
+		}
+	}
+	for cidr := range have {
+		if _, ok := want[cidr]; ok {
+			continue
+		}
+		if err := c.request(ctx, clusterKey, http.MethodDelete, setPath+"/"+url.PathEscape(cidr), nil, nil); err != nil {
 			return err
 		}
 	}
