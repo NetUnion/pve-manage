@@ -1061,7 +1061,17 @@ func (w *Worker) applyPower(ctx context.Context, vm vmRow, node string, power st
 		if stringFromMap(status, "status", "") == "stopped" {
 			return nil
 		}
-		return w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID)
+		if err := w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
+			if !isPowerTimeoutError(err) {
+				return err
+			}
+			w.logger.WarnContext(ctx, "shutdown timed out, falling back to hard stop", "cluster", vm.ClusterKey, "vmid", vm.VMID, "error", err)
+			if status, statusErr := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID); statusErr == nil && stringFromMap(status, "status", "") == "stopped" {
+				return nil
+			}
+			return w.pve.StopVM(ctx, vm.ClusterKey, node, vm.VMID)
+		}
+		return nil
 	case "reboot":
 		status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
 		if err != nil {
@@ -1070,12 +1080,30 @@ func (w *Worker) applyPower(ctx context.Context, vm vmRow, node string, power st
 		if stringFromMap(status, "status", "") != "running" {
 			return nil
 		}
-		return w.pve.RebootVM(ctx, vm.ClusterKey, node, vm.VMID)
+		if err := w.pve.RebootVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
+			if !isPowerTimeoutError(err) {
+				return err
+			}
+			w.logger.WarnContext(ctx, "reboot timed out, falling back to hard reset", "cluster", vm.ClusterKey, "vmid", vm.VMID, "error", err)
+			if status, statusErr := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID); statusErr == nil && stringFromMap(status, "status", "") == "running" {
+				return nil
+			}
+			return w.pve.ResetVM(ctx, vm.ClusterKey, node, vm.VMID)
+		}
+		return nil
 	case "", "unknown":
 		return nil
 	default:
 		return fmt.Errorf("unknown power %q", power)
 	}
+}
+
+func isPowerTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "got timeout") || strings.Contains(msg, "timed out") || strings.Contains(msg, "timeout")
 }
 
 func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any) error {
@@ -1087,7 +1115,14 @@ func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any
 		return w.markDeleted(ctx, vm.ID)
 	}
 	if err := w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
-		w.logger.WarnContext(ctx, "shutdown before delete failed", "id", vm.ID, "error", err)
+		if isPowerTimeoutError(err) {
+			w.logger.WarnContext(ctx, "shutdown before delete timed out, falling back to hard stop", "id", vm.ID, "error", err)
+			if stopErr := w.pve.StopVM(ctx, vm.ClusterKey, node, vm.VMID); stopErr != nil {
+				w.logger.WarnContext(ctx, "hard stop before delete failed", "id", vm.ID, "error", stopErr)
+			}
+		} else {
+			w.logger.WarnContext(ctx, "shutdown before delete failed", "id", vm.ID, "error", err)
+		}
 	}
 	execAt := vm.DeleteExecuteAfter.String
 	if execAt == "" {

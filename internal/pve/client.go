@@ -421,6 +421,10 @@ func (c *Client) RebootVM(ctx context.Context, clusterKey, node string, vmid int
 	return c.vmTask(ctx, clusterKey, node, vmid, "reboot")
 }
 
+func (c *Client) ResetVM(ctx context.Context, clusterKey, node string, vmid int) error {
+	return c.vmTask(ctx, clusterKey, node, vmid, "reset")
+}
+
 func (c *Client) DeleteVM(ctx context.Context, clusterKey, node string, vmid int) error {
 	var upid proxmox.UPID
 	if err := c.request(ctx, clusterKey, http.MethodDelete, fmt.Sprintf("/nodes/%s/qemu/%d", url.PathEscape(node), vmid), url.Values{"purge": {"1"}}, &upid); err != nil {
@@ -477,6 +481,8 @@ func (c *Client) vmTask(ctx context.Context, clusterKey, node string, vmid int, 
 		task, err = vm.Shutdown(ctx)
 	case "reboot":
 		task, err = vm.Reboot(ctx)
+	case "reset":
+		task, err = vm.Reset(ctx)
 	default:
 		return fmt.Errorf("unsupported vm task %q", action)
 	}
