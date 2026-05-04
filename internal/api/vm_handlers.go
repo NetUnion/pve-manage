@@ -611,10 +611,6 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.CPUKey != nil || req.StorageKey != nil || req.BridgeKey != nil || req.TemplateVMID != nil {
-		s.jsonError(w, http.StatusBadRequest, "cpu_key, bridge_key and template_vmid are immutable after creation")
-		return
-	}
 	if req.Power != nil {
 		if patchVMHasNonPowerChanges(req) {
 			s.jsonError(w, http.StatusBadRequest, "power changes must use the dedicated power actions")
