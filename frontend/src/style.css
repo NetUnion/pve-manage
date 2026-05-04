@@ -38,6 +38,10 @@ select {
   font: inherit;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
