@@ -444,7 +444,7 @@ app.innerHTML = `
         <div class="form-grid compact">
           <label>Bridge<select id="vm-bridge-key" class="input"></select></label>
           <label>Security Group<select id="vm-sg" class="input"></select></label>
-          <label class="checkbox-row"><input id="vm-uestc" type="checkbox" /> uestc restriction</label>
+          <label class="checkbox-row"><input id="vm-uestc" type="checkbox" /> UESTC内网访问限制(建议开启)</label>
         </div>
       </section>
       <section id="vm-access-section" class="wizard-section">
@@ -1971,7 +1971,7 @@ function resetVmDialog() {
   els.vmPassword.value = ''
   els.vmShared.value = ''
   els.vmBootOrder.value = 'order=scsi0;ide0'
-  els.vmUESTC.checked = false
+  els.vmUESTC.checked = true
   els.vmUESTC.disabled = false
   els.vmCluster.disabled = false
   state.vmWizardStage = 1
@@ -2222,7 +2222,7 @@ function renderDetail(vm: VM) {
       <div><span class="label">Cluster</span><div>${scrollText(displayClusterName(vm.cluster_key))}</div></div>
       <div><span class="label">Node</span><div>${scrollText(vm.node ?? 'auto')}</div></div>
       <div><span class="label">VMID</span><div>${vm.vmid}</div></div>
-      <div><span class="label">IP</span><div class="mono">${scrollText(vm.ip, 'mono')}</div></div>
+      <div><span class="label">IP/CIDR</span><div class="mono">${scrollText(vm.ip, 'mono')}</div></div>
       <div><span class="label">CPU Type</span><div>${scrollText(displayCPUName(vm.cluster_key, cpuKey))}</div></div>
       <div><span class="label">CPU Cores</span><div>${cpuCores || '-'}</div></div>
       <div><span class="label">Memory</span><div>${memoryGB ? `${memoryGB} GB` : '-'}</div></div>
@@ -2233,7 +2233,7 @@ function renderDetail(vm: VM) {
       <div><span class="label">Security Group</span><div>${scrollText(vm.security_group_name)}</div></div>
       <div><span class="label">SSH Keys</span><div>${scrollText(vm.sshkeys.length ? `${vm.sshkeys.length} item(s)` : '-', 'mono')}</div></div>
       <div><span class="label">Shared Users</span><div>${scrollText(vm.shared_usernames.length ? vm.shared_usernames.join(', ') : '-', 'mono')}</div></div>
-      <div><span class="label">UESTC</span><div>${vm.uestc_restricted ? 'force' : 'choose'}</div></div>
+      <div><span class="label">UESTC内网访问限制</span><div>${vm.uestc_restricted ? 'on' : 'off'}</div></div>
       <div><span class="label">超限</span><div>${vm.quota_exempt ? 'yes' : 'no'}</div></div>
       <div><span class="label">Sync State</span><div>${statusBadge(vm.sync_state)}</div></div>
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
