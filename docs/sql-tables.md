@@ -136,6 +136,7 @@ worker 从 PVE `template-pool` 扫描出来的模板记录。
 - `shared_usernames_json`
 - `security_group_name`
 - `uestc_restricted`
+- `quota_exempt`
 - `config_json`
 - `prefer_status_json`
 - `real_status_json`
@@ -165,6 +166,7 @@ worker 从 PVE `template-pool` 扫描出来的模板记录。
 - `shared_usernames_json`：共享用户列表。
 - `security_group_name`：绑定的安全组名称。
 - `uestc_restricted`：是否强制网络限制。
+- `quota_exempt`：是否标记为超限 VM。只有管理员可在 All VMs 的编辑/接管流程中设置；为 true 时，该 VM 可以超过所选 CPU、内存、磁盘配置上限，且不计入 owner 的 VM 数量、CPU、内存、存储总配额。
 - `config_json`：业务配置快照。
 - `prefer_status_json`：期望状态/参数快照。
 - `real_status_json`：PVE 实际状态快照。

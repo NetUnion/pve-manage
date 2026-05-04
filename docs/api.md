@@ -145,6 +145,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 - `vmname` 存库时保持原名，PVE 侧实际创建时再拼 owner 前缀。
 - `disk_gb` 至少 20。
 - 所有配置都必须在 `config/config.yaml` 中合法。
+- 普通创建不能设置 `quota_exempt`；配额和选项上限总是生效。
 - `security_group_name` 和 `ssh_key_ids` 只能引用当前登录用户自己的资源，即使管理员创建 VM 也不例外。
 - 创建后会入 `provision` 任务。
 
@@ -182,6 +183,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 - `cluster_key / storage_key / bridge_key / template_vmid` 创建后不可改。
 - `disk_gb` 只能增大，不能缩小。
 - `cpu_cores / memory_gb` 改动会进入任务队列。
+- `quota_exempt` 只有管理员可改，且只在 All VMs 管理场景暴露；关闭超限时会重新按目标 owner 校验配额。
 - `power` 通过专用 power 任务处理。
 - `security_group_name` 必须属于目标 owner。普通用户编辑时目标 owner 就是自己；管理员从 All VMs 编辑时，前端会按 VM 当前 owner 或修改后的 owner 过滤 security group，后端也按目标 owner 校验。
 - `ssh_key_ids` 必须属于目标 owner。普通用户编辑时目标 owner 就是自己；管理员从 All VMs 编辑时，前端会按 VM 当前 owner 或修改后的 owner 过滤 SSH Key，后端也按目标 owner 校验。
@@ -331,7 +333,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 
 ### `PATCH /api/admin/vms/{id}`
 
-管理员修改 VM IP。
+管理员修改 VM IP 的兼容接口。新的 All VMs 编辑流程主要调用 `PATCH /api/vms/{id}`，在管理员身份下可额外修改 owner 和 `quota_exempt`。
 
 请求体：
 
@@ -365,6 +367,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 - `security_group_owner`
 - `security_group_name`
 - `uestc_restricted`
+- `quota_exempt`
 - `power`
 - `password`（可选）
 
@@ -374,6 +377,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 - 写入配置快照。
 - `security_group_name` 必须属于 `security_group_owner` 指定的用户；管理员前端按 owner 过滤可选 security group。
 - `ssh_key_ids` 必须属于 `owner_username` 指定的用户。管理员前端按 owner 过滤可选 key，避免接管时误选其他用户的 key。
+- `quota_exempt=true` 时允许接管配置超过 CPU、内存、磁盘选项限制，并且不计入 owner 总额度；否则接管会和创建一样校验配额。
 - 入队 `apply`。
 - 如果需要，再入队 `reboot`。
 

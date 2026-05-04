@@ -276,6 +276,13 @@ SET target_node = COALESCE(NULLIF(TRIM(target_node), ''), NULLIF(TRIM(node), '')
 WHERE target_node IS NULL OR TRIM(target_node) = '';
 `,
 	},
+	{
+		Version: 14,
+		Name:    "vm_quota_exempt",
+		SQL: `
+ALTER TABLE vms ADD COLUMN quota_exempt INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

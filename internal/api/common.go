@@ -75,6 +75,7 @@ type vmSummary struct {
 	SharedUsernames    []string        `json:"shared_usernames"`
 	SecurityGroupName  string          `json:"security_group_name"`
 	UESTCRestricted    bool            `json:"uestc_restricted"`
+	QuotaExempt        bool            `json:"quota_exempt"`
 	Managed            bool            `json:"managed"`
 	TaskQueuePaused    bool            `json:"task_queue_paused"`
 	Config             json.RawMessage `json:"config"`
@@ -620,7 +621,7 @@ func (s *Server) listUserVMUsage(ctx context.Context, username string) (count, c
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT config_json
 		FROM vms
-		WHERE owner_username = ? AND deleted_at IS NULL AND managed = 1
+		WHERE owner_username = ? AND deleted_at IS NULL AND managed = 1 AND quota_exempt = 0
 	`, username)
 	if err != nil {
 		return 0, 0, 0, 0, err
@@ -888,7 +889,7 @@ type vmRowQuerier interface {
 func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error) {
 	row := q.QueryRowContext(ctx, `
 		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, target_node, password, sshkeys_json, shared_usernames_json,
-		       security_group_name, uestc_restricted, managed, task_queue_paused, config_json, prefer_status_json, real_status_json,
+		       security_group_name, uestc_restricted, quota_exempt, managed, task_queue_paused, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after, metrics_json
 		FROM vms
 		WHERE id = ?
@@ -913,6 +914,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 		&shared,
 		&item.SecurityGroupName,
 		&item.UESTCRestricted,
+		&item.QuotaExempt,
 		&item.Managed,
 		&item.TaskQueuePaused,
 		&configRaw,
@@ -1126,7 +1128,7 @@ func (s *Server) listAllVMs(ctx context.Context) ([]vmSummary, error) {
 func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bool) ([]vmSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, owner_username, cluster_key, vmid, vmname, ip, node, target_node, password, sshkeys_json, shared_usernames_json,
-		       security_group_name, uestc_restricted, managed, config_json, prefer_status_json, real_status_json,
+		       security_group_name, uestc_restricted, quota_exempt, managed, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after, metrics_json
 		FROM vms
 		WHERE deleted_at IS NULL
@@ -1158,6 +1160,7 @@ func (s *Server) listVMs(ctx context.Context, current *model.User, includeAll bo
 			&shared,
 			&item.SecurityGroupName,
 			&item.UESTCRestricted,
+			&item.QuotaExempt,
 			&item.Managed,
 			&configRaw,
 			&preferRaw,

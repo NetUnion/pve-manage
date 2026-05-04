@@ -71,6 +71,8 @@ cloud-manage migrate
    - 已从 PVE 消失的 unmanaged VM 会被软删除，避免 All VMs 残留不存在的机器
    - VM 指标历史
 
+管理员在 All VMs 中可以把受管或接管 VM 标记为 `quota_exempt`。这类 VM 用来处理历史导入、特殊实验或超规格机器：它们允许超过配置项中的 CPU、内存、磁盘上限，也不会计入 owner 的 VM 数量、CPU、内存和存储总配额。普通用户创建和编辑 VM 时不能设置这个标记。
+
 ## 状态模型
 
 当前系统同时保留三层信息：

@@ -73,6 +73,7 @@ type VM = {
   shared_usernames: string[]
   security_group_name: string
   uestc_restricted: boolean
+  quota_exempt: boolean
   managed: boolean
   task_queue_paused: boolean
   config: Record<string, unknown>
@@ -113,6 +114,7 @@ type VMTableSortKey =
   | 'power'
   | 'updated'
   | 'managed'
+  | 'quota_exempt'
   | 'cpu'
   | 'memory'
   | 'disk_io'
@@ -431,6 +433,7 @@ app.innerHTML = `
             <option value="order=scsi0;ide0">disk first</option>
             <option value="order=ide0;scsi0">cdrom first</option>
           </select></label>
+          <label id="vm-quota-exempt-row" class="checkbox-row hidden"><input id="vm-quota-exempt" type="checkbox" /> 超限，不计入 owner 配额</label>
         </div>
       </section>
       <section id="vm-network-section" class="wizard-section">
@@ -588,6 +591,8 @@ const els = {
   vmCluster: $('#vm-cluster') as HTMLSelectElement,
   vmOwner: $('#vm-owner') as HTMLInputElement,
   vmOwnerRow: $('#vm-owner-row'),
+  vmQuotaExempt: $('#vm-quota-exempt') as HTMLInputElement,
+  vmQuotaExemptRow: $('#vm-quota-exempt-row'),
   vmIpRow: $('#vm-ip-row'),
   vmTemplateRow: $('#vm-template-row'),
   vmIp: $('#vm-ip') as HTMLInputElement,
@@ -1092,6 +1097,7 @@ function renderVmTable() {
           <col class="col-vm-vmid" />
           <col class="col-vm-ip" />
           <col class="col-vm-sg" />
+          <col class="col-vm-quota" />
           <col class="col-vm-sync" />
           <col class="col-vm-power" />
           <col class="col-vm-updated" />
@@ -1106,6 +1112,7 @@ function renderVmTable() {
             <th>${vmSortButton('vmid', 'VMID')}</th>
             <th>${vmSortButton('ip', 'IP')}</th>
             <th>${vmSortButton('sg', 'SG')}</th>
+            <th>${vmSortButton('quota_exempt', '超限')}</th>
             <th>${vmSortButton('sync', 'Sync')}</th>
             <th>${vmSortButton('power', 'Power')}</th>
             <th>${vmSortButton('updated', '更新时间')}</th>
@@ -1124,6 +1131,7 @@ function renderVmTable() {
                   <td>${vm.vmid}</td>
                   <td class="mono">${scrollText(vm.ip, 'mono')}</td>
                   <td>${scrollText(vm.security_group_name)}</td>
+                  <td>${vm.quota_exempt ? 'yes' : 'no'}</td>
                   <td>${statusBadge(vm.sync_state)}</td>
                   <td>${scrollText(powerFrom(vm))}</td>
                   <td>${scrollText(formatTime(vm.updated_at))}</td>
@@ -1267,6 +1275,7 @@ function renderVmLimitHint() {
   }
   const cpu = cluster.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster.cpu[0]
   const storage = cluster.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster.storage[0]
+  const quotaExempt = Boolean(state.vmDialogAdminScope && els.vmQuotaExempt.checked)
   const quotaCPU = remainingQuotaValue('cpu', 'cpu')
   const quotaMemory = remainingQuotaValue('memory', 'memory')
   const quotaStorage = remainingQuotaValue('storage', 'storage')
@@ -1276,9 +1285,9 @@ function renderVmLimitHint() {
   const editBonusMemory = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'memory_gb', 0) : 0
   const editBonusDisk = state.vmDialogMode === 'edit' && selectedVM ? configNumber(selectedVM.config, 'disk_gb', 0) : 0
   const editBonusCount = state.vmDialogMode === 'edit' && selectedVM ? 1 : 0
-  const cpuLimit = Math.max(0, Math.min(cpu?.limit ?? 0, quotaCPU + editBonusCPU))
-  const memoryLimit = Math.max(0, Math.min(cpu?.memory_limit ?? cpu?.limit ?? 0, quotaMemory + editBonusMemory))
-  const diskLimit = Math.max(0, Math.min(storage?.limit ?? 0, quotaStorage + editBonusDisk))
+  const cpuLimit = quotaExempt ? 0 : Math.max(0, Math.min(cpu?.limit ?? 0, quotaCPU + editBonusCPU))
+  const memoryLimit = quotaExempt ? 0 : Math.max(0, Math.min(cpu?.memory_limit ?? cpu?.limit ?? 0, quotaMemory + editBonusMemory))
+  const diskLimit = quotaExempt ? 0 : Math.max(0, Math.min(storage?.limit ?? 0, quotaStorage + editBonusDisk))
   const countLimit = Math.max(0, quotaCount + editBonusCount)
   const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
   els.vmLimitHint.innerHTML = `
@@ -1289,6 +1298,7 @@ function renderVmLimitHint() {
       <span>磁盘 GB 20 - ${diskLimit || '-'}</span>
       <span>VM 数量 1 - ${countLimit || '-'}</span>
       <span>可用节点 ${escapeHtml(nodeText)}</span>
+      ${quotaExempt ? '<span>超限模式 已启用，不计入 owner 配额</span>' : ''}
     </div>
   `
   els.vmCpuCores.max = cpuLimit ? String(cpuLimit) : ''
@@ -1553,9 +1563,10 @@ function renderAdminVMs() {
         <col class="col-admin-metric" />
         <col class="col-admin-metric" />
         <col class="col-admin-managed" />
+        <col class="col-admin-quota" />
         <col class="col-admin-sync" />
       </colgroup>
-      <thead><tr><th>${adminVmSortButton('name', 'Name')}</th><th>Actions</th><th>${adminVmSortButton('owner', 'Owner')}</th><th>${adminVmSortButton('cluster', 'Cluster')}</th><th>${adminVmSortButton('node', 'Node')}</th><th>${adminVmSortButton('vmid', 'VMID')}</th><th>${adminVmSortButton('ip', 'IP')}</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>${adminVmSortButton('managed', 'Managed')}</th><th>${adminVmSortButton('sync', 'Sync')}</th></tr></thead>
+      <thead><tr><th>${adminVmSortButton('name', 'Name')}</th><th>Actions</th><th>${adminVmSortButton('owner', 'Owner')}</th><th>${adminVmSortButton('cluster', 'Cluster')}</th><th>${adminVmSortButton('node', 'Node')}</th><th>${adminVmSortButton('vmid', 'VMID')}</th><th>${adminVmSortButton('ip', 'IP')}</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>${adminVmSortButton('managed', 'Managed')}</th><th>${adminVmSortButton('quota_exempt', '超限')}</th><th>${adminVmSortButton('sync', 'Sync')}</th></tr></thead>
       <tbody>
         ${items
           .map(
@@ -1573,6 +1584,7 @@ function renderAdminVMs() {
                 <td>${formatRate(vm.metrics?.disk_io)}</td>
                 <td>${formatRate(vm.metrics?.network)}</td>
                 <td>${vm.managed ? 'yes' : 'no'}</td>
+                <td>${vm.quota_exempt ? 'yes' : 'no'}</td>
                 <td>${statusBadge(vm.sync_state)}</td>
               </tr>
             `,
@@ -1617,6 +1629,8 @@ function vmSortValue(vm: VM, key: VMTableSortKey): string | number | boolean | n
       return Date.parse(vm.updated_at) || 0
     case 'managed':
       return vm.managed
+    case 'quota_exempt':
+      return vm.quota_exempt
     case 'cpu':
     case 'memory':
     case 'disk_io':
@@ -1867,6 +1881,7 @@ function renderVmFormOptions() {
     els.vmUESTC.disabled = network.uestc === 'force'
   }
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
+  els.vmQuotaExemptRow.classList.toggle('hidden', !state.vmDialogAdminScope)
   els.vmIpRow.classList.toggle('hidden', !isAdopt)
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
@@ -1917,6 +1932,7 @@ function resetVmDialog() {
   els.vmShared.value = ''
   els.vmBootOrder.value = 'order=scsi0;ide0'
   els.vmUESTC.checked = false
+  els.vmQuotaExempt.checked = false
   els.vmUESTC.disabled = false
   els.vmCluster.disabled = false
   state.vmWizardStage = 1
@@ -1948,6 +1964,7 @@ function fillVmDialog(vm: VM) {
   els.vmPassword.value = ''
   els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
+  els.vmQuotaExempt.checked = Boolean(vm.quota_exempt)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
   state.vmWizardStage = 4
@@ -1977,6 +1994,7 @@ function fillAdoptVmDialog(vm: VM) {
   els.vmPassword.value = ''
   els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
+  els.vmQuotaExempt.checked = Boolean(vm.quota_exempt)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
   els.vmCluster.disabled = true
@@ -2179,6 +2197,7 @@ function renderDetail(vm: VM) {
       <div><span class="label">SSH Keys</span><div>${scrollText(vm.sshkeys.length ? `${vm.sshkeys.length} item(s)` : '-', 'mono')}</div></div>
       <div><span class="label">Shared Users</span><div>${scrollText(vm.shared_usernames.length ? vm.shared_usernames.join(', ') : '-', 'mono')}</div></div>
       <div><span class="label">UESTC</span><div>${vm.uestc_restricted ? 'force' : 'choose'}</div></div>
+      <div><span class="label">超限</span><div>${vm.quota_exempt ? 'yes' : 'no'}</div></div>
       <div><span class="label">Sync State</span><div>${statusBadge(vm.sync_state)}</div></div>
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
       <div><span class="label">任务队列</span><div>${vm.task_queue_paused ? '<span class="badge warn">已暂停</span>' : '<span class="badge ok">运行中</span>'}</div></div>
@@ -2630,6 +2649,9 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
     if (owner && owner !== vm.owner_username) {
       payload.owner_username = owner
     }
+    if (state.vmDialogAdminScope) {
+      payload.quota_exempt = els.vmQuotaExempt.checked
+    }
   }
   return payload
 }
@@ -2655,6 +2677,7 @@ function buildAdoptVmPayload(): Record<string, unknown> {
     security_group_owner: securityGroupOwner,
     security_group_name: securityGroupName,
     uestc_restricted: els.vmUESTC.checked,
+    quota_exempt: state.vmDialogAdminScope ? els.vmQuotaExempt.checked : false,
   }
 }
 
@@ -2963,6 +2986,9 @@ function bindEvents() {
   })
   els.vmTemplate.addEventListener('change', () => {
     renderVmFormOptions()
+  })
+  els.vmQuotaExempt.addEventListener('change', () => {
+    renderVmLimitHint()
   })
   els.vmForm.addEventListener('submit', submitVmForm)
   els.sshForm.addEventListener('submit', submitSSHForm)

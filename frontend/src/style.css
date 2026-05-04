@@ -434,6 +434,10 @@ select {
   width: 120px;
 }
 
+.vm-table .col-vm-quota {
+  width: 90px;
+}
+
 .vm-table .col-vm-sync {
   width: 110px;
 }
@@ -521,6 +525,10 @@ th .cell-scroll {
 }
 
 .admin-vm-table .col-admin-managed {
+  width: 90px;
+}
+
+.admin-vm-table .col-admin-quota {
   width: 90px;
 }
 
