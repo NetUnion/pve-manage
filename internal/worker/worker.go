@@ -475,14 +475,7 @@ func (w *Worker) runRebootTask(ctx context.Context, vm vmRow) error {
 	if node == "" {
 		return nil
 	}
-	status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
-	if err != nil {
-		return err
-	}
-	if stringFromMap(status, "status", "") != "running" {
-		return nil
-	}
-	return w.pve.RebootVM(ctx, vm.ClusterKey, node, vm.VMID)
+	return w.applyPower(ctx, vm, node, "reboot")
 }
 
 func (w *Worker) markTaskRunning(ctx context.Context, taskID int64) error {
