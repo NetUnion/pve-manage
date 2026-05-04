@@ -110,6 +110,26 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	defer userRows.Close()
 
+	type adminUserRow struct {
+		user  model.User
+		quota quotaEnvelope
+		usage usageEnvelope
+	}
+	users := make([]adminUserRow, 0)
+
+	for userRows.Next() {
+		var user model.User
+		if err := userRows.Scan(&user.ID, &user.Username, &user.Email, &user.Name, &user.GroupsJSON, &user.IsActive, &user.IsAdmin, new(string), new(string), new(sql.NullString)); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		users = append(users, adminUserRow{user: user})
+	}
+	if err := userRows.Err(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	type usageTotals struct {
 		count   int
 		cpu     int
@@ -126,11 +146,11 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer usageRows.Close()
 	for usageRows.Next() {
 		var owner string
 		var raw string
 		if err := usageRows.Scan(&owner, &raw); err != nil {
+			_ = usageRows.Close()
 			s.jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -157,9 +177,11 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		usageByUser[owner] = entry
 	}
 	if err := usageRows.Err(); err != nil {
+		_ = usageRows.Close()
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_ = usageRows.Close()
 
 	sgByUser := make(map[string]int)
 	sgRows, err := s.db.QueryContext(r.Context(), `
@@ -171,36 +193,33 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer sgRows.Close()
 	for sgRows.Next() {
 		var owner string
 		var count int
 		if err := sgRows.Scan(&owner, &count); err != nil {
+			_ = sgRows.Close()
 			s.jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		sgByUser[owner] = count
 	}
 	if err := sgRows.Err(); err != nil {
+		_ = sgRows.Close()
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_ = sgRows.Close()
 
-	items := make([]userEnvelope, 0)
-	for userRows.Next() {
-		var user model.User
-		if err := userRows.Scan(&user.ID, &user.Username, &user.Email, &user.Name, &user.GroupsJSON, &user.IsActive, &user.IsAdmin, new(string), new(string), new(sql.NullString)); err != nil {
-			s.jsonError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		quota := s.effectiveQuota(&user)
-		usage := usageByUser[user.Username]
+	items := make([]userEnvelope, 0, len(users))
+	for _, row := range users {
+		quota := s.effectiveQuota(&row.user)
+		usage := usageByUser[row.user.Username]
 		items = append(items, userEnvelope{
-			Username: user.Username,
-			Email:    user.Email,
-			Name:     user.Name,
-			Groups:   parseJSONStrings(user.GroupsJSON),
-			IsAdmin:  user.IsAdmin,
+			Username: row.user.Username,
+			Email:    row.user.Email,
+			Name:     row.user.Name,
+			Groups:   parseJSONStrings(row.user.GroupsJSON),
+			IsAdmin:  row.user.IsAdmin,
 			Quota: quotaEnvelope{
 				Number:        quota.Number,
 				CPU:           quota.CPU,
@@ -214,13 +233,9 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 				CPU:           usage.cpu,
 				Memory:        usage.memory,
 				Storage:       usage.storage,
-				SecurityGroup: sgByUser[user.Username],
+				SecurityGroup: sgByUser[row.user.Username],
 			},
 		})
-	}
-	if err := userRows.Err(); err != nil {
-		s.jsonError(w, http.StatusInternalServerError, err.Error())
-		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

@@ -435,7 +435,7 @@ app.innerHTML = `
             <option value="order=scsi0;ide0">disk first</option>
             <option value="order=ide0;scsi0">cdrom first</option>
           </select></label>
-          <label id="vm-quota-exempt-row" class="checkbox-row hidden"><input id="vm-quota-exempt" type="checkbox" /> 超限，不计入 owner 配额</label>
+          <label id="vm-quota-exempt-row" class="checkbox-row hidden" hidden><input id="vm-quota-exempt" type="checkbox" /> 超限，不计入 owner 配额</label>
         </div>
       </section>
       <section id="vm-network-section" class="wizard-section">
@@ -1898,7 +1898,7 @@ function renderVmFormOptions() {
     els.vmUESTC.disabled = network.uestc === 'force'
   }
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
-  els.vmQuotaExemptRow.classList.toggle('hidden', !(state.vmDialogAdminScope && state.vmDialogMode !== 'create'))
+  els.vmQuotaExemptRow.toggleAttribute('hidden', !(state.vmDialogAdminScope && state.vmDialogMode !== 'create'))
   els.vmIpRow.classList.toggle('hidden', !isAdopt)
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
