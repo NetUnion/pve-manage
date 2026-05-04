@@ -212,6 +212,7 @@ const state = {
   detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
+  vmDialogAdminScope: false,
   vmWizardStage: 1,
   detailVmId: null as number | null,
   detailReturnPath: '/vms' as string,
@@ -1214,19 +1215,26 @@ function renderVmSSHKeyPicker() {
       selected.add(canonicalSSHKeyLine(key))
     }
   }
-  const keys = state.sshKeys
+  const ownerFilter = state.vmDialogAdminScope
+    ? (els.vmOwner.value.trim() || state.vmDialogVm?.owner_username || '').trim()
+    : ''
+  const keys = state.vmDialogAdminScope
+    ? state.adminSSHKeys.filter((key) => !ownerFilter || key.owner_username === ownerFilter)
+    : state.sshKeys
   if (!keys.length) {
-    els.vmSSHKeyList.innerHTML = `<div class="empty compact">没有可选 SSH Key。</div>`
+    const ownerText = state.vmDialogAdminScope && ownerFilter ? `${escapeHtml(ownerFilter)} 的 ` : ''
+    els.vmSSHKeyList.innerHTML = `<div class="empty compact">没有可选 ${ownerText}SSH Key。</div>`
     return
   }
   els.vmSSHKeyList.innerHTML = keys
     .map((key) => {
       const checked = selected.has(canonicalSSHKeyLine(key.public_key)) ? 'checked' : ''
+      const name = state.vmDialogAdminScope ? `${key.owner_username} / ${key.name}` : key.name
       return `
         <label class="ssh-item">
           <input type="checkbox" data-ssh-key-id="${key.id}" ${checked} />
           <span>
-            <span class="ssh-name">${escapeHtml(key.name)}</span>
+            <span class="ssh-name">${escapeHtml(name)}</span>
             <span class="ssh-key mono">${escapeHtml(shortKey(key.public_key))}</span>
           </span>
         </label>
@@ -1831,6 +1839,7 @@ function selectedSSHKeyIDs(): number[] {
 }
 
 function resetVmDialog() {
+  state.vmDialogAdminScope = false
   els.vmMode.value = 'create'
   els.vmDialogTitle.textContent = '新建 VM'
   els.vmId.value = ''
@@ -2503,7 +2512,9 @@ function startVmAutoRefresh() {
 
 async function prepareVmDialogData(mode: 'create' | 'edit' | 'adopt') {
   await loadOptions()
-  if (mode === 'adopt' && state.me?.is_admin) {
+  if (state.vmDialogAdminScope && state.me?.is_admin && (mode === 'adopt' || mode === 'edit')) {
+    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadAdminSSHKeys()])
+  } else if (mode === 'adopt' && state.me?.is_admin) {
     await Promise.all([loadAdminSecurityGroups(), loadSSHKeys()])
   } else if (mode === 'edit' && state.me?.is_admin) {
     await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadSSHKeys()])
@@ -2867,6 +2878,9 @@ function bindEvents() {
     els.vmOwner,
   ].forEach((field) => {
     field.addEventListener('input', () => {
+      if (field === els.vmOwner) {
+        renderVmSSHKeyPicker()
+      }
       if (state.vmDialogMode === 'create') {
         updateVmWizardControls()
       }
@@ -2929,6 +2943,7 @@ function bindEvents() {
           break
         case 'edit':
           try {
+            state.vmDialogAdminScope = Boolean(state.me?.is_admin && state.activeTab === 'admin' && state.adminTab === 'vms')
             state.vmDialogVm = vm
             await prepareVmDialogData('edit')
             openVmDialog('edit', vm)
@@ -2938,6 +2953,7 @@ function bindEvents() {
           break
         case 'adopt':
           try {
+            state.vmDialogAdminScope = Boolean(state.me?.is_admin && state.activeTab === 'admin' && state.adminTab === 'vms')
             state.vmDialogVm = vm
             await prepareVmDialogData('adopt')
             openVmDialog('adopt', vm)
