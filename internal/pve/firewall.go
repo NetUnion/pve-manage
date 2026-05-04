@@ -3,6 +3,7 @@ package pve
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -36,6 +37,11 @@ type firewallRule struct {
 
 type ipsetEntry struct {
 	CIDR string `json:"cidr"`
+}
+
+type ipsetEntryState struct {
+	Raw       string
+	Canonical string
 }
 
 func (c *Client) ensureSecurityGroup(ctx context.Context, clusterKey, groupName string, rules []SecurityRule) error {
@@ -124,38 +130,65 @@ func (c *Client) ensureVMIPSet(ctx context.Context, clusterKey, node string, vmi
 	if err := c.request(ctx, clusterKey, http.MethodGet, setPath, nil, &current); err != nil {
 		return err
 	}
-	have := make(map[string]struct{}, len(current))
+	have := make(map[string]ipsetEntryState, len(current))
 	for _, entry := range current {
-		if entry.CIDR == "" {
+		canonical := canonicalIPSetCIDR(entry.CIDR)
+		if canonical == "" {
 			continue
 		}
-		have[entry.CIDR] = struct{}{}
+		have[canonical] = ipsetEntryState{Raw: entry.CIDR, Canonical: canonical}
 	}
 	want := make(map[string]struct{}, len(entries))
 	for _, cidr := range entries {
-		if cidr == "" {
+		canonical := canonicalIPSetCIDR(cidr)
+		if canonical == "" {
 			continue
 		}
-		want[cidr] = struct{}{}
-		if _, ok := have[cidr]; ok {
+		want[canonical] = struct{}{}
+		if _, ok := have[canonical]; ok {
 			continue
 		}
-		if err := c.request(ctx, clusterKey, http.MethodPost, setPath, url.Values{"cidr": {cidr}}, nil); err != nil {
+		if err := c.request(ctx, clusterKey, http.MethodPost, setPath, url.Values{"cidr": {canonical}}, nil); err != nil {
 			if isAlreadyExistsErr(err) {
 				continue
 			}
 			return err
 		}
 	}
-	for cidr := range have {
-		if _, ok := want[cidr]; ok {
+	for canonical, entry := range have {
+		if _, ok := want[canonical]; ok {
 			continue
 		}
-		if err := c.request(ctx, clusterKey, http.MethodDelete, setPath+"/"+url.PathEscape(cidr), nil, nil); err != nil {
+		if err := c.request(ctx, clusterKey, http.MethodDelete, setPath+"/"+url.PathEscape(entry.Raw), nil, nil); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func canonicalIPSetCIDR(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "+") || strings.HasPrefix(value, "-") {
+		value = strings.TrimSpace(value[1:])
+	}
+	if ip, network, err := net.ParseCIDR(value); err == nil {
+		if v4 := ip.To4(); v4 != nil {
+			network.IP = v4.Mask(network.Mask)
+		} else {
+			network.IP = ip.Mask(network.Mask)
+		}
+		return network.String()
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String() + "/32"
+		}
+		return ip.String() + "/128"
+	}
+	return value
 }
 
 func (c *Client) ensureVMGroupRules(ctx context.Context, clusterKey, node string, vmid int, groups []string) error {
