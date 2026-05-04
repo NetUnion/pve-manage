@@ -2211,6 +2211,7 @@ function renderDetail(vm: VM) {
   const cpuKey = configString(vm.config, 'cpu_key', configString(vm.config, 'pve_cpu'))
   const storageKey = configString(vm.config, 'storage_key')
   const bridgeKey = configString(vm.config, 'bridge_key')
+  const gateway = configString(vm.config, 'gateway', '-')
   const bootOrder = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   const cpuCores = configNumber(vm.config, 'cpu_cores', 0)
   const memoryGB = configNumber(vm.config, 'memory_gb', 0)
@@ -2222,7 +2223,6 @@ function renderDetail(vm: VM) {
       <div><span class="label">Cluster</span><div>${scrollText(displayClusterName(vm.cluster_key))}</div></div>
       <div><span class="label">Node</span><div>${scrollText(vm.node ?? 'auto')}</div></div>
       <div><span class="label">VMID</span><div>${vm.vmid}</div></div>
-      <div><span class="label">IP/CIDR</span><div class="mono">${scrollText(vm.ip, 'mono')}</div></div>
       <div><span class="label">CPU Type</span><div>${scrollText(displayCPUName(vm.cluster_key, cpuKey))}</div></div>
       <div><span class="label">CPU Cores</span><div>${cpuCores || '-'}</div></div>
       <div><span class="label">Memory</span><div>${memoryGB ? `${memoryGB} GB` : '-'}</div></div>
@@ -2241,6 +2241,20 @@ function renderDetail(vm: VM) {
       ${deleteInfo}
     </div>
     ${passwordBlock}
+    <div class="detail-block">
+      <h4>Network</h4>
+      <div class="detail-network">
+        <div>
+          <span class="label">IP/CIDR</span>
+          <div class="mono">${scrollText(vm.ip, 'mono')}</div>
+        </div>
+        <div>
+          <span class="label">Gateway</span>
+          <div class="mono">${scrollText(gateway, 'mono')}</div>
+        </div>
+      </div>
+      <div class="detail-note">如果目标系统不支持 cloud-init 配置网络，请手动配置为此网络，IPv6 使用 SLAAC。</div>
+    </div>
     <div class="detail-block">
       <h4>月度 MAX 指标</h4>
       ${
