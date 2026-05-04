@@ -121,6 +121,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	w.logger.Info("worker started")
+	if err := w.recoverAbandonedRunningTasks(ctx); err != nil {
+		w.logger.WarnContext(ctx, "recover abandoned running tasks failed", "error", err)
+	}
 
 	for {
 		if err := w.syncOnce(ctx); err != nil {
@@ -134,6 +137,31 @@ func (w *Worker) Run(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) error {
+	now := timestamp()
+	if _, err := w.db.ExecContext(ctx, `
+		UPDATE maintenance_tasks
+		SET status = 'pending',
+		    error = NULL,
+		    started_at = NULL,
+		    updated_at = ?
+		WHERE status = 'running'
+		  AND finished_at IS NULL
+	`, now); err != nil {
+		return err
+	}
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'pending',
+		    error = NULL,
+		    started_at = NULL,
+		    updated_at = ?
+		WHERE status = 'running'
+		  AND finished_at IS NULL
+	`, now)
+	return err
 }
 
 func (w *Worker) syncOnce(ctx context.Context) error {
