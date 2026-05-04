@@ -763,7 +763,7 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 		if desiredSSH == "" {
 			params.Set("delete", "sshkeys")
 		} else {
-			params.Set("sshkeys", url.PathEscape(desiredSSH))
+			params.Set("sshkeys", doubleURLEncodePath(desiredSSH))
 		}
 	}
 	if currentNet0, _ := cfg["net0"].(string); currentNet0 != "" {
@@ -815,6 +815,12 @@ func normalizeSSHKeyLine(value string) (string, error) {
 		line += " " + comment
 	}
 	return line, nil
+}
+
+func doubleURLEncodePath(value string) string {
+	// PVE's sshkeys field expects the key material itself to be URL-encoded
+	// before the outer form encoding happens, so we intentionally escape twice.
+	return url.PathEscape(url.PathEscape(value))
 }
 
 func normalizeBootOrder(value string) string {
