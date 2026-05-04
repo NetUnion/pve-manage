@@ -101,7 +101,22 @@ type VMMetrics = {
   network: number
 }
 
-type AdminVmSortKey = 'cpu' | 'memory' | 'disk_io' | 'network'
+type VMTableSortKey =
+  | 'name'
+  | 'owner'
+  | 'cluster'
+  | 'node'
+  | 'vmid'
+  | 'ip'
+  | 'sg'
+  | 'sync'
+  | 'power'
+  | 'updated'
+  | 'managed'
+  | 'cpu'
+  | 'memory'
+  | 'disk_io'
+  | 'network'
 
 type AppTab = 'vms' | 'security' | 'ssh' | 'templates' | 'admin' | 'vm-detail'
 
@@ -208,7 +223,8 @@ const state = {
   users: [] as UserRow[],
   activeTab: 'vms' as AppTab,
   adminTab: 'users' as AdminTab,
-  adminVmSort: { key: 'cpu' as AdminVmSortKey, dir: 'desc' as 'asc' | 'desc' },
+  vmSort: { key: 'updated' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' },
+  adminVmSort: { key: 'cpu' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' },
   detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
@@ -1059,7 +1075,7 @@ function renderTabs() {
 }
 
 function renderVmTable() {
-  const filtered = state.vms.filter((vm) => vm.managed)
+  const filtered = sortVMs(state.vms.filter((vm) => vm.managed), state.vmSort)
   if (!filtered.length) {
     els.vmTable.innerHTML = `<div class="empty">没有匹配的 VM。</div>`
     return
@@ -1082,17 +1098,17 @@ function renderVmTable() {
         </colgroup>
         <thead>
           <tr>
-            <th>Name</th>
+            <th>${vmSortButton('name', 'Name')}</th>
             <th>Actions</th>
-            <th>Owner</th>
-            <th>Cluster</th>
-            <th>Node</th>
-            <th>VMID</th>
-            <th>IP</th>
-            <th>SG</th>
-            <th>Sync</th>
-            <th>Power</th>
-            <th>更新时间</th>
+            <th>${vmSortButton('owner', 'Owner')}</th>
+            <th>${vmSortButton('cluster', 'Cluster')}</th>
+            <th>${vmSortButton('node', 'Node')}</th>
+            <th>${vmSortButton('vmid', 'VMID')}</th>
+            <th>${vmSortButton('ip', 'IP')}</th>
+            <th>${vmSortButton('sg', 'SG')}</th>
+            <th>${vmSortButton('sync', 'Sync')}</th>
+            <th>${vmSortButton('power', 'Power')}</th>
+            <th>${vmSortButton('updated', '更新时间')}</th>
           </tr>
         </thead>
         <tbody>
@@ -1521,7 +1537,7 @@ function renderAdminVMs() {
     els.adminVmTable.innerHTML = `<div class="empty">没有 VM。</div>`
     return
   }
-  const items = sortedAdminVMs()
+  const items = sortVMs(state.allVMs, state.adminVmSort)
   els.adminVmTable.innerHTML = `
     <table class="admin-vm-table">
       <colgroup>
@@ -1539,7 +1555,7 @@ function renderAdminVMs() {
         <col class="col-admin-managed" />
         <col class="col-admin-sync" />
       </colgroup>
-      <thead><tr><th>Name</th><th>Actions</th><th>Owner</th><th>Cluster</th><th>Node</th><th>VMID</th><th>IP</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>Managed</th><th>Sync</th></tr></thead>
+      <thead><tr><th>${adminVmSortButton('name', 'Name')}</th><th>Actions</th><th>${adminVmSortButton('owner', 'Owner')}</th><th>${adminVmSortButton('cluster', 'Cluster')}</th><th>${adminVmSortButton('node', 'Node')}</th><th>${adminVmSortButton('vmid', 'VMID')}</th><th>${adminVmSortButton('ip', 'IP')}</th><th>${adminVmSortButton('cpu', 'CPU Avg')}</th><th>${adminVmSortButton('memory', 'Mem Avg')}</th><th>${adminVmSortButton('disk_io', 'Disk IO')}</th><th>${adminVmSortButton('network', 'Network')}</th><th>${adminVmSortButton('managed', 'Managed')}</th><th>${adminVmSortButton('sync', 'Sync')}</th></tr></thead>
       <tbody>
         ${items
           .map(
@@ -1568,26 +1584,69 @@ function renderAdminVMs() {
   scheduleScrollableTextRefresh(els.adminVmTable)
 }
 
-function sortedAdminVMs(): VM[] {
-  const { key, dir } = state.adminVmSort
-  return [...state.allVMs].sort((a, b) => {
-    const av = adminVmMetricValue(a, key)
-    const bv = adminVmMetricValue(b, key)
-    if (av == null && bv == null) return a.vmid - b.vmid
-    if (av == null) return 1
-    if (bv == null) return -1
-    if (av === bv) return a.vmid - b.vmid
-    const result = av - bv
-    return dir === 'asc' ? result : -result
+function sortVMs(items: VM[], sort: { key: VMTableSortKey; dir: 'asc' | 'desc' }): VM[] {
+  const direction = sort.dir === 'asc' ? 1 : -1
+  return [...items].sort((a, b) => {
+    const result = compareSortableValues(vmSortValue(a, sort.key), vmSortValue(b, sort.key))
+    if (result !== 0) return result * direction
+    return a.vmid - b.vmid
   })
 }
 
-function adminVmMetricValue(vm: VM, key: AdminVmSortKey): number | null {
-  const value = vm.metrics?.[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
+function vmSortValue(vm: VM, key: VMTableSortKey): string | number | boolean | null {
+  switch (key) {
+    case 'name':
+      return displayVmName(vm)
+    case 'owner':
+      return vm.owner_username
+    case 'cluster':
+      return displayClusterName(vm.cluster_key)
+    case 'node':
+      return vm.node ?? 'auto'
+    case 'vmid':
+      return vm.vmid
+    case 'ip':
+      return vm.ip || ''
+    case 'sg':
+      return vm.security_group_name
+    case 'sync':
+      return vm.sync_state
+    case 'power':
+      return powerFrom(vm)
+    case 'updated':
+      return Date.parse(vm.updated_at) || 0
+    case 'managed':
+      return vm.managed
+    case 'cpu':
+    case 'memory':
+    case 'disk_io':
+    case 'network': {
+      const value = vm.metrics?.[key]
+      return typeof value === 'number' && Number.isFinite(value) ? value : null
+    }
+  }
 }
 
-function adminVmSortButton(key: AdminVmSortKey, label: string): string {
+function compareSortableValues(a: string | number | boolean | null, b: string | number | boolean | null): number {
+  if (a == null && b == null) return 0
+  if (a == null) return 1
+  if (b == null) return -1
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  if (typeof a === 'boolean' && typeof b === 'boolean') return Number(a) - Number(b)
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' })
+}
+
+function defaultVmSortDir(key: VMTableSortKey): 'asc' | 'desc' {
+  return key === 'updated' || key === 'cpu' || key === 'memory' || key === 'disk_io' || key === 'network' ? 'desc' : 'asc'
+}
+
+function vmSortButton(key: VMTableSortKey, label: string): string {
+  const active = state.vmSort.key === key
+  const marker = active ? (state.vmSort.dir === 'asc' ? ' ↑' : ' ↓') : ''
+  return `<button class="table-sort" data-vm-sort="${key}" type="button">${escapeHtml(label + marker)}</button>`
+}
+
+function adminVmSortButton(key: VMTableSortKey, label: string): string {
   const active = state.adminVmSort.key === key
   const marker = active ? (state.adminVmSort.dir === 'asc' ? ' ↑' : ' ↓') : ''
   return `<button class="table-sort" data-admin-vm-sort="${key}" type="button">${escapeHtml(label + marker)}</button>`
@@ -2925,15 +2984,25 @@ function bindEvents() {
 
     const adminVmSort = target.closest<HTMLElement>('[data-admin-vm-sort]')
     if (adminVmSort) {
-      const key = adminVmSort.dataset.adminVmSort as AdminVmSortKey
-      if (key === 'cpu' || key === 'memory' || key === 'disk_io' || key === 'network') {
-        if (state.adminVmSort.key === key) {
-          state.adminVmSort.dir = state.adminVmSort.dir === 'asc' ? 'desc' : 'asc'
-        } else {
-          state.adminVmSort = { key, dir: 'desc' }
-        }
-        renderAdminVMs()
+      const key = adminVmSort.dataset.adminVmSort as VMTableSortKey
+      if (state.adminVmSort.key === key) {
+        state.adminVmSort.dir = state.adminVmSort.dir === 'asc' ? 'desc' : 'asc'
+      } else {
+        state.adminVmSort = { key, dir: defaultVmSortDir(key) }
       }
+      renderAdminVMs()
+      return
+    }
+
+    const vmSort = target.closest<HTMLElement>('[data-vm-sort]')
+    if (vmSort) {
+      const key = vmSort.dataset.vmSort as VMTableSortKey
+      if (state.vmSort.key === key) {
+        state.vmSort.dir = state.vmSort.dir === 'asc' ? 'desc' : 'asc'
+      } else {
+        state.vmSort = { key, dir: defaultVmSortDir(key) }
+      }
+      renderVmTable()
       return
     }
 
