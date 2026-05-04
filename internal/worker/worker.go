@@ -36,7 +36,7 @@ type vmRow struct {
 	VMName              string
 	IP                  string
 	Node                string
-	TargetNode          string
+	TargetNode          sql.NullString
 	Password            string
 	SSHKeysJSON         string
 	SharedUsernamesJSON string
@@ -670,7 +670,10 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 	if !found {
 		return "", fmt.Errorf("template %d not found in template-pool", templateVMID)
 	}
-	targetNode := strings.TrimSpace(vm.TargetNode)
+	targetNode := ""
+	if vm.TargetNode.Valid {
+		targetNode = strings.TrimSpace(vm.TargetNode.String)
+	}
 	if targetNode == "" {
 		targetNode = strings.TrimSpace(stringFrom(prefer, "target_node", ""))
 	}
