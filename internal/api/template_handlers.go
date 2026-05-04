@@ -99,7 +99,7 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusForbidden, err.Error())
 		return
 	}
-	rows, err := s.db.QueryContext(r.Context(), `
+	userRows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, username, email, name, groups_json, is_active, is_admin, created_at, updated_at, last_login_at
 		FROM users
 		ORDER BY username
@@ -108,24 +108,93 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer rows.Close()
+	defer userRows.Close()
+
+	type usageTotals struct {
+		count   int
+		cpu     int
+		memory  int
+		storage int
+	}
+	usageByUser := make(map[string]usageTotals)
+	usageRows, err := s.db.QueryContext(r.Context(), `
+		SELECT owner_username, config_json
+		FROM vms
+		WHERE deleted_at IS NULL AND managed = 1 AND quota_exempt = 0
+	`)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer usageRows.Close()
+	for usageRows.Next() {
+		var owner string
+		var raw string
+		if err := usageRows.Scan(&owner, &raw); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		entry := usageByUser[owner]
+		entry.count++
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(raw), &cfg); err == nil {
+			if v, ok := cfg["cpu_cores"]; ok {
+				if n, ok := intFromAny(v); ok {
+					entry.cpu += n
+				}
+			}
+			if v, ok := cfg["memory_gb"]; ok {
+				if n, ok := intFromAny(v); ok {
+					entry.memory += n
+				}
+			}
+			if v, ok := cfg["disk_gb"]; ok {
+				if n, ok := intFromAny(v); ok {
+					entry.storage += n
+				}
+			}
+		}
+		usageByUser[owner] = entry
+	}
+	if err := usageRows.Err(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	sgByUser := make(map[string]int)
+	sgRows, err := s.db.QueryContext(r.Context(), `
+		SELECT owner_username, COUNT(1)
+		FROM security_groups
+		GROUP BY owner_username
+	`)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer sgRows.Close()
+	for sgRows.Next() {
+		var owner string
+		var count int
+		if err := sgRows.Scan(&owner, &count); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		sgByUser[owner] = count
+	}
+	if err := sgRows.Err(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	items := make([]userEnvelope, 0)
-	for rows.Next() {
+	for userRows.Next() {
 		var user model.User
-		if err := rows.Scan(&user.ID, &user.Username, &user.Email, &user.Name, &user.GroupsJSON, &user.IsActive, &user.IsAdmin, new(string), new(string), new(sql.NullString)); err != nil {
+		if err := userRows.Scan(&user.ID, &user.Username, &user.Email, &user.Name, &user.GroupsJSON, &user.IsActive, &user.IsAdmin, new(string), new(string), new(sql.NullString)); err != nil {
 			s.jsonError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		quota := s.effectiveQuota(&user)
-		count, cpu, memory, storage, err := s.listUserVMUsage(r.Context(), user.Username)
-		if err != nil {
-			count, cpu, memory, storage = 0, 0, 0, 0
-		}
-		sgCount, err := s.countUserSecurityGroups(r.Context(), user.Username)
-		if err != nil {
-			sgCount = 0
-		}
+		usage := usageByUser[user.Username]
 		items = append(items, userEnvelope{
 			Username: user.Username,
 			Email:    user.Email,
@@ -141,13 +210,17 @@ func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
 				UESTC:         quota.UESTC,
 			},
 			Usage: usageEnvelope{
-				Count:         count,
-				CPU:           cpu,
-				Memory:        memory,
-				Storage:       storage,
-				SecurityGroup: sgCount,
+				Count:         usage.count,
+				CPU:           usage.cpu,
+				Memory:        usage.memory,
+				Storage:       usage.storage,
+				SecurityGroup: sgByUser[user.Username],
 			},
 		})
+	}
+	if err := userRows.Err(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
