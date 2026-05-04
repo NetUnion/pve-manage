@@ -256,10 +256,6 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.QuotaExempt != nil {
-		s.jsonError(w, http.StatusBadRequest, "quota_exempt must use the admin quota action")
-		return
-	}
 	if req.ClusterKey == "" || req.VMName == "" || req.CPUKey == "" || req.StorageKey == "" || req.BridgeKey == "" || req.SecurityGroupName == "" {
 		s.jsonError(w, http.StatusBadRequest, "missing required fields")
 		return
@@ -609,14 +605,10 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	}
 	sharedOnly := current.Username != vm.OwnerUsername && !current.IsAdmin
 	if sharedOnly {
-		if req.VMName != nil || req.Password != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.BootOrder != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SSHKeyIDs != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil || req.QuotaExempt != nil {
+		if req.VMName != nil || req.Password != nil || req.CPUKey != nil || req.CPUCores != nil || req.MemoryGB != nil || req.StorageKey != nil || req.DiskGB != nil || req.BridgeKey != nil || req.BootOrder != nil || req.TemplateVMID != nil || req.SSHKeys != nil || req.SSHKeyIDs != nil || req.SharedUsernames != nil || req.SecurityGroupName != nil || req.UESTCRestricted != nil {
 			s.jsonError(w, http.StatusForbidden, "shared users can only change power")
 			return
 		}
-	}
-	if req.QuotaExempt != nil {
-		s.jsonError(w, http.StatusBadRequest, "quota_exempt must use the admin quota action")
-		return
 	}
 	if req.CPUKey != nil || req.StorageKey != nil || req.BridgeKey != nil || req.TemplateVMID != nil {
 		s.jsonError(w, http.StatusBadRequest, "cpu_key, storage_key, bridge_key and template_vmid are immutable after creation")
@@ -793,14 +785,6 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		cfg["uestc_restricted"] = vm.UESTCRestricted
 		prefer["uestc_restricted"] = vm.UESTCRestricted
 		changed = true
-	}
-	if req.QuotaExempt != nil && !sharedOnly {
-		if finalQuotaExempt != vm.QuotaExempt {
-			vm.QuotaExempt = finalQuotaExempt
-			cfg["quota_exempt"] = vm.QuotaExempt
-			prefer["quota_exempt"] = vm.QuotaExempt
-			changed = true
-		}
 	}
 	if req.Power != nil {
 		if *req.Power != "running" && *req.Power != "stopped" && *req.Power != "reboot" {
