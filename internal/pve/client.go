@@ -182,10 +182,6 @@ func (c *Client) SetPoolVMs(ctx context.Context, clusterKey, poolID string, vmid
 	if len(parts) == 0 {
 		return nil
 	}
-	client, err := c.clusterClient(clusterKey)
-	if err != nil {
-		return err
-	}
 	if err := c.request(ctx, clusterKey, http.MethodPut, "/pools/"+url.PathEscape(poolID), url.Values{
 		"vms":        {strings.Join(parts, ",")},
 		"allow-move": {"1"},
