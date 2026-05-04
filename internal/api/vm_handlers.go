@@ -891,7 +891,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil || req.OwnerUsername != nil {
+	if !vm.QuotaExempt && (req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil || req.OwnerUsername != nil) {
 		finalCPUKey, _ := cfg["cpu_key"].(string)
 		finalCPUCores := intFromOrZero(cfg, "cpu_cores")
 		finalMemoryGB := intFromOrZero(cfg, "memory_gb")

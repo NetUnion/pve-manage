@@ -1324,31 +1324,31 @@ function renderVmLimitHint() {
   const clusterCpuLimit = cpu?.limit ?? 0
   const clusterMemoryLimit = cpu?.memory_limit ?? cpu?.limit ?? 0
   const clusterDiskLimit = storage?.limit ?? 0
-  const cpuLimit = quotaExempt ? clusterCpuLimit : Math.max(0, Math.min(clusterCpuLimit, quotaCPU + editBonusCPU))
-  const memoryLimit = quotaExempt ? clusterMemoryLimit : Math.max(0, Math.min(clusterMemoryLimit, quotaMemory + editBonusMemory))
-  const diskLimit = quotaExempt ? clusterDiskLimit : Math.max(0, Math.min(clusterDiskLimit, quotaStorage + editBonusDisk))
-  const countLimit = quotaExempt ? quotaCount : Math.max(0, quotaCount + editBonusCount)
+  const cpuLimit = quotaExempt ? 0 : Math.max(0, Math.min(clusterCpuLimit, quotaCPU + editBonusCPU))
+  const memoryLimit = quotaExempt ? 0 : Math.max(0, Math.min(clusterMemoryLimit, quotaMemory + editBonusMemory))
+  const diskLimit = quotaExempt ? 0 : Math.max(0, Math.min(clusterDiskLimit, quotaStorage + editBonusDisk))
+  const countLimit = quotaExempt ? 0 : Math.max(0, quotaCount + editBonusCount)
   const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
   const quotaOwnerName = state.vmDialogAdminScope ? (els.vmOwner.value.trim() || (state.vmDialogVm?.owner_username ?? '目标 owner')) : (state.me?.username ?? '当前用户')
   els.vmLimitHint.innerHTML = `
     <div class="limit-hint-title">可选范围</div>
     <div class="limit-hint-grid">
       <span>配额主体 ${escapeHtml(quotaOwnerName)}</span>
-      <span>CPU 核数 1 - ${cpuLimit || '-'}</span>
-      <span>内存 GB 1 - ${memoryLimit || '-'}</span>
-      <span>磁盘 GB 20 - ${diskLimit || '-'}</span>
-      <span>VM 数量 1 - ${countLimit || '-'}</span>
+      <span>CPU 核数 ${quotaExempt ? '不受限' : `1 - ${cpuLimit || '-'}`}</span>
+      <span>内存 GB ${quotaExempt ? '不受限' : `1 - ${memoryLimit || '-'}`}</span>
+      <span>磁盘 GB ${quotaExempt ? '不受限' : `20 - ${diskLimit || '-'}`}</span>
+      <span>VM 数量 ${quotaExempt ? '不受限' : `1 - ${countLimit || '-'}`}</span>
       <span>可用节点 ${escapeHtml(nodeText)}</span>
       ${quotaExempt ? '<span>当前 VM 已超限，不计入 owner 配额</span>' : ''}
     </div>
   `
-  els.vmCpuCores.max = cpuLimit ? String(cpuLimit) : ''
-  els.vmMemoryGB.max = memoryLimit ? String(memoryLimit) : ''
-  els.vmDiskGB.max = diskLimit ? String(diskLimit) : ''
+  els.vmCpuCores.max = quotaExempt ? '' : (cpuLimit ? String(cpuLimit) : '')
+  els.vmMemoryGB.max = quotaExempt ? '' : (memoryLimit ? String(memoryLimit) : '')
+  els.vmDiskGB.max = quotaExempt ? '' : (diskLimit ? String(diskLimit) : '')
   els.vmCpuCores.min = '1'
   els.vmMemoryGB.min = '1'
   els.vmDiskGB.min = '20'
-  if (state.vmDialogMode === 'create' && countLimit <= 0) {
+  if (state.vmDialogMode === 'create' && !quotaExempt && countLimit <= 0) {
     els.vmSubmit.disabled = true
   }
 }
