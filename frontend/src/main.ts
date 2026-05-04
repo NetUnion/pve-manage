@@ -1954,6 +1954,7 @@ function resetVmDialog() {
   els.vmCluster.disabled = false
   state.vmWizardStage = 1
   renderVmFormOptions()
+  els.vmQuotaExemptRow.hidden = true
 }
 
 function fillVmDialog(vm: VM) {
@@ -2024,6 +2025,7 @@ function openVmDialog(mode: 'create' | 'edit' | 'adopt', vm?: VM) {
   state.vmDialogMode = mode
   if (mode === 'create') {
     resetVmDialog()
+    els.vmQuotaExemptRow.hidden = true
   } else if (vm) {
     if (mode === 'adopt') {
       fillAdoptVmDialog(vm)
