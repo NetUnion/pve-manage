@@ -612,7 +612,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.CPUKey != nil || req.StorageKey != nil || req.BridgeKey != nil || req.TemplateVMID != nil {
-		s.jsonError(w, http.StatusBadRequest, "cpu_key, storage_key, bridge_key and template_vmid are immutable after creation")
+		s.jsonError(w, http.StatusBadRequest, "cpu_key, bridge_key and template_vmid are immutable after creation")
 		return
 	}
 	if req.Power != nil {
@@ -667,7 +667,6 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	prefer := map[string]any{}
 	_ = json.Unmarshal(vm.PreferStatus, &prefer)
 	oldCPUKey := stringFromMap(oldCfg, "cpu_key")
-	oldStorageKey := stringFromMap(oldCfg, "storage_key")
 	oldBridgeKey := stringFromMap(oldCfg, "bridge_key")
 	oldTemplateVMID := intFromOrZero(oldCfg, "template_vmid")
 	oldDiskGB := intFromOrZero(oldCfg, "disk_gb")
@@ -714,10 +713,6 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CPUKey != nil && strings.TrimSpace(*req.CPUKey) != oldCPUKey {
 		s.jsonError(w, http.StatusBadRequest, "cpu_key is immutable after creation")
-		return
-	}
-	if req.StorageKey != nil && strings.TrimSpace(*req.StorageKey) != oldStorageKey {
-		s.jsonError(w, http.StatusBadRequest, "storage_key is immutable after creation")
 		return
 	}
 	if req.BridgeKey != nil && strings.TrimSpace(*req.BridgeKey) != oldBridgeKey {
@@ -823,7 +818,6 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			}
 			cfg["storage_key"] = *req.StorageKey
 			prefer["storage_key"] = *req.StorageKey
-			rebootNeeded = true
 		}
 		if req.BridgeKey != nil {
 			bridge, ok := cluster.BridgeByKey(*req.BridgeKey)
@@ -891,7 +885,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !vm.QuotaExempt && (req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil || req.OwnerUsername != nil) {
+	if !vm.QuotaExempt && (req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil || req.StorageKey != nil || req.OwnerUsername != nil) {
 		finalCPUKey, _ := cfg["cpu_key"].(string)
 		finalCPUCores := intFromOrZero(cfg, "cpu_cores")
 		finalMemoryGB := intFromOrZero(cfg, "memory_gb")

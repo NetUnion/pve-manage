@@ -354,6 +354,26 @@ func (c *Client) ResizeDisk(ctx context.Context, clusterKey, node string, vmid i
 	return waitProxmoxTask(ctx, task, 30*time.Minute)
 }
 
+func (c *Client) MoveDisk(ctx context.Context, clusterKey, node string, vmid int, disk string, targetStorage string) error {
+	if strings.TrimSpace(disk) == "" || strings.TrimSpace(targetStorage) == "" {
+		return nil
+	}
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	vm := proxmox.VirtualMachine{}
+	vm.New(client, node, vmid)
+	task, err := vm.MoveDisk(ctx, disk, &proxmox.VirtualMachineMoveDiskOptions{
+		Storage: targetStorage,
+		Delete:  1,
+	})
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, task, 30*time.Minute)
+}
+
 func (c *Client) VMStatus(ctx context.Context, clusterKey, node string, vmid int) (map[string]any, error) {
 	var status map[string]any
 	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/status/current", url.PathEscape(node), vmid), nil, &status); err != nil {

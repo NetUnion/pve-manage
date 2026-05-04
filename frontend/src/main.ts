@@ -1929,7 +1929,7 @@ function renderVmFormOptions() {
   const managedEdit = state.vmDialogMode === 'edit'
   els.vmTemplate.disabled = managedEdit || isAdopt
   els.vmCpuKey.disabled = managedEdit || isAdopt
-  els.vmStorageKey.disabled = managedEdit || isAdopt
+  els.vmStorageKey.disabled = false
   els.vmBridgeKey.disabled = managedEdit || isAdopt
   els.vmBootOrder.disabled = isAdopt
   els.vmDiskGB.disabled = isAdopt
@@ -2688,6 +2688,7 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
     password: els.vmPassword.value.trim() || undefined,
     cpu_cores: Number(els.vmCpuCores.value),
     memory_gb: Number(els.vmMemoryGB.value),
+    storage_key: els.vmStorageKey.value,
     disk_gb: Number(els.vmDiskGB.value),
     boot_order: els.vmBootOrder.value,
     ssh_key_ids: selectedSSHKeyIDs(),

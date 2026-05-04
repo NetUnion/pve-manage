@@ -756,6 +756,9 @@ func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]an
 	if err := w.applyVMConfigIfNeeded(ctx, vm, prefer, bridgeKey, bridge, cfg, node); err != nil {
 		return err
 	}
+	if err := w.moveDiskIfNeeded(ctx, vm, prefer, cfg, node); err != nil {
+		return err
+	}
 	if err := w.resizeDisk(ctx, vm, prefer, cfg, node); err != nil {
 		return err
 	}
@@ -828,6 +831,25 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 		return w.markPasswordSynced(ctx, vm.ID)
 	}
 	return nil
+}
+
+func (w *Worker) moveDiskIfNeeded(ctx context.Context, vm vmRow, prefer map[string]any, cfg map[string]any, node string) error {
+	desiredStorage := strings.TrimSpace(stringFrom(prefer, "storage_key", ""))
+	if desiredStorage == "" {
+		desiredStorage = strings.TrimSpace(stringFromMap(parseJSONMap(vm.ConfigJSON), "storage_key", ""))
+	}
+	if desiredStorage == "" {
+		return nil
+	}
+	diskKey, diskRaw := primaryDiskConfig(cfg)
+	if diskKey == "" || diskRaw == "" {
+		return fmt.Errorf("cannot determine primary disk")
+	}
+	currentStorage := storageKeyFromDisk(diskRaw)
+	if currentStorage == "" || currentStorage == desiredStorage {
+		return nil
+	}
+	return w.pve.MoveDisk(ctx, vm.ClusterKey, node, vm.VMID, diskKey, desiredStorage)
 }
 
 func normalizeSSHKeyList(values []string) ([]string, error) {
