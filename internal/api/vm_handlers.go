@@ -98,7 +98,6 @@ type adoptVMRequest struct {
 	SecurityGroupOwner string   `json:"security_group_owner"`
 	SecurityGroupName  string   `json:"security_group_name"`
 	UESTCRestricted    *bool    `json:"uestc_restricted"`
-	QuotaExempt        bool     `json:"quota_exempt"`
 	Power              string   `json:"power"`
 }
 
@@ -255,6 +254,10 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	var req createVMRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.QuotaExempt != nil {
+		s.jsonError(w, http.StatusBadRequest, "quota_exempt must use the admin quota action")
 		return
 	}
 	if req.ClusterKey == "" || req.VMName == "" || req.CPUKey == "" || req.StorageKey == "" || req.BridgeKey == "" || req.SecurityGroupName == "" {
@@ -611,6 +614,10 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.QuotaExempt != nil {
+		s.jsonError(w, http.StatusBadRequest, "quota_exempt must use the admin quota action")
+		return
+	}
 	if req.CPUKey != nil || req.StorageKey != nil || req.BridgeKey != nil || req.TemplateVMID != nil {
 		s.jsonError(w, http.StatusBadRequest, "cpu_key, storage_key, bridge_key and template_vmid are immutable after creation")
 		return
@@ -660,15 +667,6 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		}
 		targetOwner = owner
 	}
-	finalQuotaExempt := vm.QuotaExempt
-	if req.QuotaExempt != nil {
-		if !current.IsAdmin {
-			s.jsonError(w, http.StatusForbidden, "quota_exempt is admin only")
-			return
-		}
-		finalQuotaExempt = *req.QuotaExempt
-	}
-
 	cfg := map[string]any{}
 	_ = json.Unmarshal(vm.Config, &cfg)
 	oldCfg := map[string]any{}
@@ -907,7 +905,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil || req.OwnerUsername != nil || req.QuotaExempt != nil {
+	if req.CPUCores != nil || req.MemoryGB != nil || req.DiskGB != nil || req.OwnerUsername != nil {
 		finalCPUKey, _ := cfg["cpu_key"].(string)
 		finalCPUCores := intFromOrZero(cfg, "cpu_cores")
 		finalMemoryGB := intFromOrZero(cfg, "memory_gb")
@@ -918,48 +916,46 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if !finalQuotaExempt {
-			if cpuOpt, ok := clusterCfg.CPUByKey(finalCPUKey); ok && finalCPUCores > cpuOpt.Limit {
-				s.jsonError(w, http.StatusBadRequest, "cpu_cores exceed cluster option limit")
-				return
-			}
-			if cpuOpt, ok := clusterCfg.CPUByKey(finalCPUKey); ok && finalMemoryGB > cpuOpt.MemoryLimit {
-				s.jsonError(w, http.StatusBadRequest, "memory_gb exceed cluster option limit")
-				return
-			}
-			if storageOpt, ok := clusterCfg.StorageByKey(finalStorageKey); ok && finalDiskGB > storageOpt.Limit {
-				s.jsonError(w, http.StatusBadRequest, "disk_gb exceed cluster option limit")
-				return
-			}
-			quotaOwner := targetOwner
-			quotaUser := current
-			if quotaOwner != current.Username {
-				quotaUser, err = s.loadUserRow(r.Context(), quotaOwner)
-				if err != nil {
-					s.jsonError(w, http.StatusBadRequest, "owner user not found")
-					return
-				}
-			}
-			quota := s.effectiveQuota(quotaUser)
-			count, usedCPU, usedMemory, usedStorage, err := s.listUserVMUsage(r.Context(), quotaOwner)
+		if cpuOpt, ok := clusterCfg.CPUByKey(finalCPUKey); ok && finalCPUCores > cpuOpt.Limit {
+			s.jsonError(w, http.StatusBadRequest, "cpu_cores exceed cluster option limit")
+			return
+		}
+		if cpuOpt, ok := clusterCfg.CPUByKey(finalCPUKey); ok && finalMemoryGB > cpuOpt.MemoryLimit {
+			s.jsonError(w, http.StatusBadRequest, "memory_gb exceed cluster option limit")
+			return
+		}
+		if storageOpt, ok := clusterCfg.StorageByKey(finalStorageKey); ok && finalDiskGB > storageOpt.Limit {
+			s.jsonError(w, http.StatusBadRequest, "disk_gb exceed cluster option limit")
+			return
+		}
+		quotaOwner := targetOwner
+		quotaUser := current
+		if quotaOwner != current.Username {
+			quotaUser, err = s.loadUserRow(r.Context(), quotaOwner)
 			if err != nil {
-				s.jsonError(w, http.StatusInternalServerError, err.Error())
+				s.jsonError(w, http.StatusBadRequest, "owner user not found")
 				return
 			}
-			if !vm.QuotaExempt && vm.OwnerUsername == quotaOwner {
-				count--
-				usedCPU -= intFromOrZero(oldCfg, "cpu_cores")
-				usedMemory -= intFromOrZero(oldCfg, "memory_gb")
-				usedStorage -= intFromOrZero(oldCfg, "disk_gb")
-			}
-			count++
-			usedCPU += finalCPUCores
-			usedMemory += finalMemoryGB
-			usedStorage += finalDiskGB
-			if count > quota.Number || usedCPU > quota.CPU || usedMemory > quota.Memory || usedStorage > quota.Storage {
-				s.jsonError(w, http.StatusBadRequest, "quota exceeded")
-				return
-			}
+		}
+		quota := s.effectiveQuota(quotaUser)
+		count, usedCPU, usedMemory, usedStorage, err := s.listUserVMUsage(r.Context(), quotaOwner)
+		if err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if !vm.QuotaExempt && vm.OwnerUsername == quotaOwner {
+			count--
+			usedCPU -= intFromOrZero(oldCfg, "cpu_cores")
+			usedMemory -= intFromOrZero(oldCfg, "memory_gb")
+			usedStorage -= intFromOrZero(oldCfg, "disk_gb")
+		}
+		count++
+		usedCPU += finalCPUCores
+		usedMemory += finalMemoryGB
+		usedStorage += finalDiskGB
+		if count > quota.Number || usedCPU > quota.CPU || usedMemory > quota.Memory || usedStorage > quota.Storage {
+			s.jsonError(w, http.StatusBadRequest, "quota exceeded")
+			return
 		}
 	}
 
@@ -1556,30 +1552,28 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "unknown bridge_key")
 		return
 	}
-	if !req.QuotaExempt && (req.CPUCores > cpuOpt.Limit || req.MemoryGB > cpuOpt.MemoryLimit || req.DiskGB > storageOpt.Limit) {
+	if req.CPUCores > cpuOpt.Limit || req.MemoryGB > cpuOpt.MemoryLimit || req.DiskGB > storageOpt.Limit {
 		s.jsonError(w, http.StatusBadRequest, "requested resources exceed selected cluster option limit")
 		return
 	}
-	if !req.QuotaExempt {
-		quotaUser, err := s.loadUserRow(r.Context(), req.OwnerUsername)
-		if err != nil {
-			s.jsonError(w, http.StatusBadRequest, "owner user not found")
-			return
-		}
-		quota := s.effectiveQuota(quotaUser)
-		count, usedCPU, usedMemory, usedStorage, err := s.listUserVMUsage(r.Context(), req.OwnerUsername)
-		if err != nil {
-			s.jsonError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		count++
-		usedCPU += req.CPUCores
-		usedMemory += req.MemoryGB
-		usedStorage += req.DiskGB
-		if count > quota.Number || usedCPU > quota.CPU || usedMemory > quota.Memory || usedStorage > quota.Storage {
-			s.jsonError(w, http.StatusBadRequest, "quota exceeded")
-			return
-		}
+	quotaUser, err := s.loadUserRow(r.Context(), req.OwnerUsername)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "owner user not found")
+		return
+	}
+	quota := s.effectiveQuota(quotaUser)
+	count, usedCPU, usedMemory, usedStorage, err := s.listUserVMUsage(r.Context(), req.OwnerUsername)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	count++
+	usedCPU += req.CPUCores
+	usedMemory += req.MemoryGB
+	usedStorage += req.DiskGB
+	if count > quota.Number || usedCPU > quota.CPU || usedMemory > quota.Memory || usedStorage > quota.Storage {
+		s.jsonError(w, http.StatusBadRequest, "quota exceeded")
+		return
 	}
 	if _, _, err := net.ParseCIDR(req.IP); err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid cidr")
@@ -1665,7 +1659,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		"security_group_owner": sgOwner,
 		"security_group_name":  req.SecurityGroupName,
 		"uestc_restricted":     uestcRestricted,
-		"quota_exempt":         req.QuotaExempt,
+		"quota_exempt":         false,
 		"boot_order":           bootOrder,
 		"power":                req.Power,
 		"root_user":            "root",
@@ -1688,7 +1682,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		"security_group_owner": sgOwner,
 		"security_group_name":  req.SecurityGroupName,
 		"uestc_restricted":     uestcRestricted,
-		"quota_exempt":         req.QuotaExempt,
+		"quota_exempt":         false,
 		"boot_order":           bootOrder,
 	})
 	realJSON := vm.RealStatus
@@ -1715,7 +1709,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		    delete_execute_after = NULL, updated_at = ?, version = version + 1
 		WHERE id = ?
 	`, req.OwnerUsername, req.VMName, req.IP, password, mustJSON(sshKeys), mustJSON(sharedUsernames),
-		req.SecurityGroupName, boolToInt(uestcRestricted), boolToInt(req.QuotaExempt), string(cfgJSON), string(preferJSON), string(realJSON), now, vm.ID); err != nil {
+		req.SecurityGroupName, boolToInt(uestcRestricted), 0, string(cfgJSON), string(preferJSON), string(realJSON), now, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

@@ -304,6 +304,10 @@ type adminPatchVMRequest struct {
 	IP string `json:"ip"`
 }
 
+type adminQuotaExemptPatchRequest struct {
+	QuotaExempt bool `json:"quota_exempt"`
+}
+
 func (s *Server) handleAdminPatchVM(w http.ResponseWriter, r *http.Request) {
 	current, err := s.requireAdmin(r)
 	if err != nil {
@@ -421,6 +425,81 @@ func (s *Server) handleAdminPatchVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queued": true})
+}
+
+func (s *Server) handleAdminSetQuotaExempt(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.requireAdmin(r); err != nil {
+		s.jsonError(w, http.StatusForbidden, err.Error())
+		return
+	}
+	id, err := parseIDParam(r, "id")
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid vm id")
+		return
+	}
+	vm, err := s.loadVMRow(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.jsonError(w, http.StatusNotFound, "vm not found")
+			return
+		}
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if vm.SyncState == "deleting" || vm.DeleteRequestedAt != nil {
+		s.jsonError(w, http.StatusBadRequest, "vm is pending deletion")
+		return
+	}
+	var req adminQuotaExemptPatchRequest
+	if err := decodeJSONBody(r, &req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	cfg := map[string]any{}
+	_ = json.Unmarshal(vm.Config, &cfg)
+	prefer := map[string]any{}
+	_ = json.Unmarshal(vm.PreferStatus, &prefer)
+	if vm.QuotaExempt == req.QuotaExempt {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "quota_exempt": vm.QuotaExempt})
+		return
+	}
+	cfg["quota_exempt"] = req.QuotaExempt
+	prefer["quota_exempt"] = req.QuotaExempt
+	prefer["generation"] = intFromOrZero(prefer, "generation") + 1
+	cfgBytes, _ := json.Marshal(cfg)
+	preferBytes, _ := json.Marshal(prefer)
+	now := timestamp()
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(r.Context(), `
+		UPDATE vms
+		SET quota_exempt = ?, config_json = ?, prefer_status_json = ?, sync_state = CASE WHEN managed = 1 THEN 'pending' ELSE sync_state END,
+		    sync_error = NULL, updated_at = ?, version = version + 1
+		WHERE id = ?
+	`, boolToInt(req.QuotaExempt), string(cfgBytes), string(preferBytes), now, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if vm.Managed {
+		if err := queueVMTaskTx(r.Context(), tx, vm.ID, "apply", map[string]any{"vm_id": vm.ID, "quota_exempt": req.QuotaExempt}); err != nil {
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	vm, err = s.loadVMRow(r.Context(), vm.ID)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
 }
 
 func parseIDParam(r *http.Request, name string) (int64, error) {

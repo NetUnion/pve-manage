@@ -236,6 +236,7 @@ const state = {
   vmWizardStage: 1,
   detailVmId: null as number | null,
   detailReturnPath: '/vms' as string,
+  quotaDialogVm: null as VM | null,
   sgDialogMode: 'create' as 'create' | 'edit',
   sgDialogGroup: null as SecurityGroup | null,
   sgRules: [] as Rule[],
@@ -435,7 +436,6 @@ app.innerHTML = `
             <option value="order=scsi0;ide0">disk first</option>
             <option value="order=ide0;scsi0">cdrom first</option>
           </select></label>
-          <label id="vm-quota-exempt-row" class="checkbox-row hidden" hidden><input id="vm-quota-exempt" type="checkbox" /> 超限，不计入 owner 配额</label>
         </div>
       </section>
       <section id="vm-network-section" class="wizard-section">
@@ -534,6 +534,21 @@ app.innerHTML = `
       </div>
     </form>
   </dialog>
+
+  <dialog id="quota-dialog" class="dialog">
+    <form id="quota-form" class="dialog-body">
+      <div class="dialog-head">
+        <h3>设置超限</h3>
+        <button type="button" class="icon-btn" data-close-dialog="quota-dialog">×</button>
+      </div>
+      <input type="hidden" id="quota-vm-id" />
+      <label class="checkbox-row"><input id="quota-exempt" type="checkbox" /> 超限，不计入 owner 配额</label>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" data-close-dialog="quota-dialog">取消</button>
+        <button type="submit" class="btn btn-primary">保存</button>
+      </div>
+    </form>
+  </dialog>
 `
 
 const $ = <T extends HTMLElement>(selector: string): T => {
@@ -575,10 +590,12 @@ const els = {
   sgDialog: $('#sg-dialog') as HTMLDialogElement,
   detailPageContent: $('#detail-page-content'),
   ipDialog: $('#ip-dialog') as HTMLDialogElement,
+  quotaDialog: $('#quota-dialog') as HTMLDialogElement,
   vmForm: $('#vm-form') as HTMLFormElement,
   sshForm: $('#ssh-form') as HTMLFormElement,
   sgForm: $('#sg-form') as HTMLFormElement,
   ipForm: $('#ip-form') as HTMLFormElement,
+  quotaForm: $('#quota-form') as HTMLFormElement,
   vmDialogTitle: $('#vm-dialog-title'),
   sshDialogTitle: $('#ssh-dialog-title'),
   sgDialogTitle: $('#sg-dialog-title'),
@@ -593,8 +610,6 @@ const els = {
   vmCluster: $('#vm-cluster') as HTMLSelectElement,
   vmOwner: $('#vm-owner') as HTMLInputElement,
   vmOwnerRow: $('#vm-owner-row'),
-  vmQuotaExempt: $('#vm-quota-exempt') as HTMLInputElement,
-  vmQuotaExemptRow: $('#vm-quota-exempt-row'),
   vmIpRow: $('#vm-ip-row'),
   vmTemplateRow: $('#vm-template-row'),
   vmIp: $('#vm-ip') as HTMLInputElement,
@@ -633,6 +648,8 @@ const els = {
   vmConfigSection: $('#vm-config-section'),
   vmNetworkSection: $('#vm-network-section'),
   vmAccessSection: $('#vm-access-section'),
+  quotaVmId: $('#quota-vm-id') as HTMLInputElement,
+  quotaExempt: $('#quota-exempt') as HTMLInputElement,
 }
 
 function escapeHtml(value: string): string {
@@ -960,7 +977,11 @@ function rowActions(vm: VM, allowAdminIp = false): string {
 }
 
 function adminVmActions(vm: VM): string {
-  return rowActions(vm)
+  const base = rowActions(vm, true).replace(
+    '</div>',
+    `<button class="btn btn-mini" data-action="admin-quota" data-id="${vm.id}">超限</button></div>`,
+  )
+  return base
 }
 
 function renderSummary() {
@@ -1289,7 +1310,7 @@ function renderVmLimitHint() {
   }
   const cpu = cluster.cpu.find((item) => item.key === els.vmCpuKey.value) ?? cluster.cpu[0]
   const storage = cluster.storage.find((item) => item.key === els.vmStorageKey.value) ?? cluster.storage[0]
-  const quotaExempt = Boolean(state.vmDialogAdminScope && els.vmQuotaExempt.checked)
+  const quotaExempt = Boolean(state.vmDialogMode !== 'create' && state.vmDialogVm?.quota_exempt)
   const quotaOwner = quotaContextUser()
   const quotaCPU = remainingQuotaValue(quotaOwner, 'cpu', 'cpu')
   const quotaMemory = remainingQuotaValue(quotaOwner, 'memory', 'memory')
@@ -1306,7 +1327,7 @@ function renderVmLimitHint() {
   const cpuLimit = quotaExempt ? clusterCpuLimit : Math.max(0, Math.min(clusterCpuLimit, quotaCPU + editBonusCPU))
   const memoryLimit = quotaExempt ? clusterMemoryLimit : Math.max(0, Math.min(clusterMemoryLimit, quotaMemory + editBonusMemory))
   const diskLimit = quotaExempt ? clusterDiskLimit : Math.max(0, Math.min(clusterDiskLimit, quotaStorage + editBonusDisk))
-  const countLimit = Math.max(0, quotaCount + editBonusCount)
+  const countLimit = quotaExempt ? quotaCount : Math.max(0, quotaCount + editBonusCount)
   const nodeText = cpu?.node?.length ? cpu.node.join(', ') : '全部节点'
   const quotaOwnerName = state.vmDialogAdminScope ? (els.vmOwner.value.trim() || (state.vmDialogVm?.owner_username ?? '目标 owner')) : (state.me?.username ?? '当前用户')
   els.vmLimitHint.innerHTML = `
@@ -1318,7 +1339,7 @@ function renderVmLimitHint() {
       <span>磁盘 GB 20 - ${diskLimit || '-'}</span>
       <span>VM 数量 1 - ${countLimit || '-'}</span>
       <span>可用节点 ${escapeHtml(nodeText)}</span>
-      ${quotaExempt ? '<span>超限模式 已启用，不计入 owner 配额</span>' : ''}
+      ${quotaExempt ? '<span>当前 VM 已超限，不计入 owner 配额</span>' : ''}
     </div>
   `
   els.vmCpuCores.max = cpuLimit ? String(cpuLimit) : ''
@@ -1796,10 +1817,6 @@ function currentCluster(): ClusterOption | undefined {
   return state.options?.clusters.find((cluster) => cluster.key === els.vmCluster.value) ?? state.options?.clusters[0]
 }
 
-function canUseVmQuotaExempt(): boolean {
-  return Boolean(state.me?.is_admin && state.activeTab === 'admin' && state.adminTab === 'vms' && state.vmDialogMode !== 'create')
-}
-
 function renderVmFormOptions() {
   const opts = state.options?.clusters ?? []
   const previousCluster = els.vmCluster.value || opts[0]?.key || ''
@@ -1905,8 +1922,6 @@ function renderVmFormOptions() {
     els.vmUESTC.disabled = network.uestc === 'force'
   }
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
-  const showQuotaExempt = canUseVmQuotaExempt()
-  els.vmQuotaExemptRow.toggleAttribute('hidden', !showQuotaExempt)
   els.vmIpRow.classList.toggle('hidden', !isAdopt)
   els.vmTemplateRow.classList.toggle('hidden', isAdopt)
   els.vmCluster.disabled = isAdopt
@@ -1957,12 +1972,10 @@ function resetVmDialog() {
   els.vmShared.value = ''
   els.vmBootOrder.value = 'order=scsi0;ide0'
   els.vmUESTC.checked = false
-  els.vmQuotaExempt.checked = false
   els.vmUESTC.disabled = false
   els.vmCluster.disabled = false
   state.vmWizardStage = 1
   renderVmFormOptions()
-  els.vmQuotaExemptRow.hidden = true
 }
 
 function fillVmDialog(vm: VM) {
@@ -1990,7 +2003,6 @@ function fillVmDialog(vm: VM) {
   els.vmPassword.value = ''
   els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
-  els.vmQuotaExempt.checked = Boolean(vm.quota_exempt)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
   state.vmWizardStage = 4
@@ -2020,7 +2032,6 @@ function fillAdoptVmDialog(vm: VM) {
   els.vmPassword.value = ''
   els.vmBootOrder.value = configString(vm.config, 'boot_order', configString(vm.config, 'boot', 'order=scsi0;ide0'))
   els.vmUESTC.checked = Boolean(vm.uestc_restricted)
-  els.vmQuotaExempt.checked = Boolean(vm.quota_exempt)
   els.vmUESTC.disabled = Boolean(cluster.network[0]?.uestc === 'force')
   els.vmShared.value = vm.shared_usernames.join('\n')
   els.vmCluster.disabled = true
@@ -2033,7 +2044,6 @@ function openVmDialog(mode: 'create' | 'edit' | 'adopt', vm?: VM) {
   state.vmDialogMode = mode
   if (mode === 'create') {
     resetVmDialog()
-    els.vmQuotaExemptRow.hidden = true
   } else if (vm) {
     if (mode === 'adopt') {
       fillAdoptVmDialog(vm)
@@ -2676,9 +2686,6 @@ function buildEditVmPayload(vm: VM): Record<string, unknown> {
     if (owner && owner !== vm.owner_username) {
       payload.owner_username = owner
     }
-    if (canUseVmQuotaExempt()) {
-      payload.quota_exempt = els.vmQuotaExempt.checked
-    }
   }
   return payload
 }
@@ -2704,7 +2711,6 @@ function buildAdoptVmPayload(): Record<string, unknown> {
     security_group_owner: securityGroupOwner,
     security_group_name: securityGroupName,
     uestc_restricted: els.vmUESTC.checked,
-    quota_exempt: canUseVmQuotaExempt() ? els.vmQuotaExempt.checked : false,
   }
 }
 
@@ -2844,6 +2850,38 @@ async function submitIpForm(event: SubmitEvent) {
     els.ipDialog.close()
     state.allVMs = []
     await loadAdminVMs()
+  } catch (err) {
+    flash((err as Error).message, 'error')
+  }
+}
+
+function openQuotaDialog(vm: VM) {
+  state.quotaDialogVm = vm
+  els.quotaVmId.value = String(vm.id)
+  els.quotaExempt.checked = Boolean(vm.quota_exempt)
+  els.quotaDialog.showModal()
+}
+
+async function submitQuotaForm(event: SubmitEvent) {
+  event.preventDefault()
+  try {
+    const vmId = Number(els.quotaVmId.value)
+    await api(`/api/admin/vms/${vmId}/quota-exempt`, {
+      method: 'PATCH',
+      body: JSON.stringify({ quota_exempt: els.quotaExempt.checked }),
+    })
+    flash('超限状态已更新。', 'ok')
+    els.quotaDialog.close()
+    state.allVMs = []
+    await loadAdminVMs(true)
+    if (state.activeTab === 'vms') {
+      await loadVMs()
+      renderSummary()
+    }
+    if (state.activeTab === 'vm-detail' && state.detailVmId === vmId) {
+      const detail = await api<VM>(`/api/vms/${vmId}`)
+      renderDetail(detail)
+    }
   } catch (err) {
     flash((err as Error).message, 'error')
   }
@@ -3015,13 +3053,11 @@ function bindEvents() {
   els.vmTemplate.addEventListener('change', () => {
     renderVmFormOptions()
   })
-  els.vmQuotaExempt.addEventListener('change', () => {
-    renderVmLimitHint()
-  })
   els.vmForm.addEventListener('submit', submitVmForm)
   els.sshForm.addEventListener('submit', submitSSHForm)
   els.sgForm.addEventListener('submit', submitSgForm)
   els.ipForm.addEventListener('submit', submitIpForm)
+  els.quotaForm.addEventListener('submit', submitQuotaForm)
   els.addRuleBtn.addEventListener('click', () => addRuleRow())
   document.body.addEventListener('click', async (event) => {
     const target = event.target as HTMLElement
@@ -3105,6 +3141,9 @@ function bindEvents() {
           els.ipVmId.value = String(vm.id)
           els.ipValue.value = vm.ip
           els.ipDialog.showModal()
+          break
+        case 'admin-quota':
+          openQuotaDialog(vm)
           break
       }
       return
