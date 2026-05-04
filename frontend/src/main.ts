@@ -1214,8 +1214,7 @@ function renderVmSSHKeyPicker() {
       selected.add(canonicalSSHKeyLine(key))
     }
   }
-  const adminScope = state.me?.is_admin && (state.vmDialogMode === 'adopt' || state.vmDialogMode === 'edit')
-  const keys = adminScope ? state.adminSSHKeys : state.sshKeys
+  const keys = state.sshKeys
   if (!keys.length) {
     els.vmSSHKeyList.innerHTML = `<div class="empty compact">没有可选 SSH Key。</div>`
     return
@@ -2505,9 +2504,9 @@ function startVmAutoRefresh() {
 async function prepareVmDialogData(mode: 'create' | 'edit' | 'adopt') {
   await loadOptions()
   if (mode === 'adopt' && state.me?.is_admin) {
-    await Promise.all([loadAdminSecurityGroups(), loadAdminSSHKeys()])
+    await Promise.all([loadAdminSecurityGroups(), loadSSHKeys()])
   } else if (mode === 'edit' && state.me?.is_admin) {
-    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadAdminSSHKeys()])
+    await Promise.all([loadTemplates(), loadAdminSecurityGroups(), loadSSHKeys()])
   } else {
     await Promise.all([loadSecurityGroups(), loadSSHKeys(), loadTemplates()])
   }

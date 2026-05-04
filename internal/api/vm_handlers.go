@@ -727,12 +727,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			if len(*req.SSHKeyIDs) == 0 {
 				vm.SSHKeys = []string{}
 			} else {
-				var keys []string
-				if current.IsAdmin {
-					keys, err = s.loadSSHKeysByIDsAny(r.Context(), *req.SSHKeyIDs)
-				} else {
-					keys, err = s.loadSSHKeysByIDs(r.Context(), current.Username, *req.SSHKeyIDs)
-				}
+				keys, err := s.loadSSHKeysByIDs(r.Context(), current.Username, *req.SSHKeyIDs)
 				if err != nil {
 					s.jsonError(w, http.StatusBadRequest, err.Error())
 					return
@@ -1545,7 +1540,7 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 	}
 	var sshKeys []string
 	if len(req.SSHKeyIDs) > 0 {
-		sshKeys, err = s.loadSSHKeysByIDsAny(r.Context(), req.SSHKeyIDs)
+		sshKeys, err = s.loadSSHKeysByIDs(r.Context(), current.Username, req.SSHKeyIDs)
 		if err != nil {
 			s.jsonError(w, http.StatusBadRequest, err.Error())
 			return
