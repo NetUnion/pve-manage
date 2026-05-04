@@ -145,6 +145,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 - `vmname` 存库时保持原名，PVE 侧实际创建时再拼 owner 前缀。
 - `disk_gb` 至少 20。
 - 所有配置都必须在 `config/config.yaml` 中合法。
+- `ssh_key_ids` 只能引用当前登录用户自己的 SSH Keys，即使管理员创建 VM 也不例外。
 - 创建后会入 `provision` 任务。
 
 返回：
@@ -182,6 +183,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 - `disk_gb` 只能增大，不能缩小。
 - `cpu_cores / memory_gb` 改动会进入任务队列。
 - `power` 通过专用 power 任务处理。
+- `ssh_key_ids` 必须属于目标 owner。普通用户编辑时目标 owner 就是自己；管理员从 All VMs 编辑时，前端会按 VM 当前 owner 或修改后的 owner 过滤 SSH Key，后端也按目标 owner 校验。
 
 ### `DELETE /api/vms/{id}`
 
@@ -369,6 +371,7 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 
 - 先把 VM 变成受管。
 - 写入配置快照。
+- `ssh_key_ids` 必须属于 `owner_username` 指定的用户。管理员前端按 owner 过滤可选 key，避免接管时误选其他用户的 key。
 - 入队 `apply`。
 - 如果需要，再入队 `reboot`。
 
@@ -383,6 +386,12 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 ### `GET /api/admin/ssh-keys`
 
 返回全量 SSH Keys。
+
+说明：
+
+- 该接口用于管理员审计和排查。
+- VM 创建和普通用户编辑不会使用这里返回的全量 key。
+- 管理员从 `Admin / All VMs` 编辑或接管 VM 时，会使用这里的全量结果，但前端按目标 owner 过滤展示，后端也按目标 owner 校验 `ssh_key_ids`。
 
 ### `GET /api/admin/maintenance-tasks`
 
@@ -412,4 +421,3 @@ OIDC 回调入口。登录完成后写入会话并返回前端。
 ### 维护任务状态
 
 维护任务复用类似的状态语义，前端通过 Admin 页查看。
-

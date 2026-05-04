@@ -25,7 +25,7 @@ Cloud Manage 是一个面向 Proxmox VE 的虚拟机控制面，目标是把“�
 - `internal/worker`
   - 任务队列消费、维护任务、PVE 同步、库存扫描、指标采集。
 - `internal/pve`
-  - PVE API 封装。
+  - PVE API 封装，VM 生命周期和配置下发优先走 `github.com/luthermonson/go-proxmox`。
 - `frontend`
   - Vite 控制台前端。
 
@@ -140,6 +140,14 @@ worker 每轮先处理维护任务，再处理 VM 任务。
   - 可以查看全量 VM、全量 security group、全量 SSH key、维护任务。
   - 可以接管 unmanaged VM。
   - 可以修改 IP 和 owner 等管理字段。
+
+VM 创建表单里的 SSH Key 选择只使用当前登录用户自己的 SSH Key。普通用户编辑 VM 时也只能选择自己的 key。管理员从 `Admin / All VMs` 进入编辑或接管时，表单会加载全量 SSH Key，但按目标 owner 过滤，只显示该 owner 的 key，并在选项上显示 `owner / name`，避免不同用户的 key 重名。后端同样按目标 owner 校验 `ssh_key_ids`，防止把别人的 key 错挂到 VM 上。
+
+## PVE 同步细节
+
+worker 对 VM 的实际改动通过 `internal/pve` 封装完成。VM 配置下发使用 `go-proxmox` 的 `VirtualMachine.Config`，而不是前端或 worker 手写 HTTP 请求。
+
+PVE 的 cloud-init `sshkeys` 参数比较特殊：该字段值本身需要先做 rawurlencode，随后再由 HTTP form 编码层提交。代码里保留了专门的编码 helper，避免空格、`/`、`+`、`@` 等字符被 PVE 误解析。
 
 ## 前端
 

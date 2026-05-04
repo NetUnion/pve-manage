@@ -202,6 +202,10 @@ worker 从 PVE `template-pool` 扫描出来的模板记录。
 说明：
 
 - 前端创建 VM 时建议从这里选择 key，而不是直接手填。
+- VM 创建时只能引用当前登录用户自己的 key。
+- 普通用户编辑 VM 时只能引用自己的 key。
+- 管理员可以通过 Admin 页面查看全量 key；从 `Admin / All VMs` 编辑或接管 VM 时，表单按目标 owner 过滤 key，并显示 `owner / name` 以区分重名。
+- 后端保存 VM 的 `ssh_key_ids` 时按目标 owner 查询和校验，避免把其他用户的 key 写入 VM。
 
 ## node_metrics
 
@@ -274,6 +278,12 @@ worker 从 PVE `template-pool` 扫描出来的模板记录。
 
 任务历史会在完成后保留一段时间，之后自动清理。
 
+PVE 配置下发说明：
+
+- `apply` / `provision` 等任务由 worker 调用 `internal/pve` 完成。
+- VM 配置变更通过 `go-proxmox` 的 `VirtualMachine.Config` 执行。
+- PVE 的 `sshkeys` 参数保存的是 SSH 公钥列表，但提交时需要先对字段值做 rawurlencode，再由外层 HTTP form 编码提交。
+
 ## maintenance_tasks
 
 全局维护任务队列表。
@@ -311,4 +321,3 @@ worker 从 PVE `template-pool` 扫描出来的模板记录。
 - `backfill_target_node`
 
 它们用于把历史数据修正到当前语义，保证老库也能平稳升级。
-
