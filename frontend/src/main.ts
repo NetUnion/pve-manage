@@ -1714,7 +1714,12 @@ function renderVmFormOptions() {
   const isAdopt = state.vmDialogMode === 'adopt'
   const adminEdit = Boolean(state.me?.is_admin && state.vmDialogMode === 'edit')
   const adminScope = Boolean(state.me?.is_admin) && (isAdopt || adminEdit)
-  const groups = adminScope ? state.adminSecurityGroups : state.securityGroups
+  const securityGroupOwnerFilter = adminScope
+    ? (els.vmOwner.value.trim() || state.vmDialogVm?.owner_username || '').trim()
+    : ''
+  const groups = adminScope
+    ? state.adminSecurityGroups.filter((sg) => !securityGroupOwnerFilter || sg.owner_username === securityGroupOwnerFilter)
+    : state.securityGroups
 
   els.vmCluster.innerHTML = opts.map((cluster) => {
     const cpuNames = cluster.cpu.map((cpu) => cpu.name).join(' / ')
@@ -1771,7 +1776,7 @@ function renderVmFormOptions() {
           return `<option value="${escapeHtml(value)}">${escapeHtml(sg.owner_username)} / ${escapeHtml(sg.name)}</option>`
         })
         .join('')
-    : `<option value="">请先创建安全组</option>`
+    : `<option value="">${securityGroupOwnerFilter ? `${escapeHtml(securityGroupOwnerFilter)} 没有安全组` : '请先创建安全组'}</option>`
 
   if (previousCpu && cpuKeys.has(previousCpu)) els.vmCpuKey.value = previousCpu
   if (!els.vmCpuKey.value && adoptNode) els.vmCpuKey.value = chooseCpuKeyForNode(cluster, adoptNode)
@@ -2879,7 +2884,7 @@ function bindEvents() {
   ].forEach((field) => {
     field.addEventListener('input', () => {
       if (field === els.vmOwner) {
-        renderVmSSHKeyPicker()
+        renderVmFormOptions()
       }
       if (state.vmDialogMode === 'create') {
         updateVmWizardControls()

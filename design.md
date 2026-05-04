@@ -141,7 +141,7 @@ worker 每轮先处理维护任务，再处理 VM 任务。
   - 可以接管 unmanaged VM。
   - 可以修改 IP 和 owner 等管理字段。
 
-VM 创建表单里的 SSH Key 选择只使用当前登录用户自己的 SSH Key。普通用户编辑 VM 时也只能选择自己的 key。管理员从 `Admin / All VMs` 进入编辑或接管时，表单会加载全量 SSH Key，但按目标 owner 过滤，只显示该 owner 的 key，并在选项上显示 `owner / name`，避免不同用户的 key 重名。后端同样按目标 owner 校验 `ssh_key_ids`，防止把别人的 key 错挂到 VM 上。
+VM 创建表单里的 security group 和 SSH Key 选择只使用当前登录用户自己的资源。普通用户编辑 VM 时也只能选择自己的 security group / SSH Key。管理员从 `Admin / All VMs` 进入编辑或接管时，表单会加载全量资源，但按目标 owner 过滤，只显示该 owner 的 security group / SSH Key；SSH Key 选项会显示 `owner / name`，避免不同用户的 key 重名。后端同样按目标 owner 校验 `security_group_name` 和 `ssh_key_ids`，防止把其他用户的资源错挂到 VM 上。
 
 ## PVE 同步细节
 

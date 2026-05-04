@@ -767,7 +767,7 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			s.jsonError(w, http.StatusBadRequest, "invalid security_group_name")
 			return
 		}
-		if _, err := s.loadSecurityGroupRow(r.Context(), vm.OwnerUsername, *req.SecurityGroupName); err != nil {
+		if _, err := s.loadSecurityGroupRow(r.Context(), targetOwner, *req.SecurityGroupName); err != nil {
 			s.jsonError(w, http.StatusBadRequest, "security group not found or not owned by owner")
 			return
 		}

@@ -86,6 +86,11 @@ OIDC 登录后的用户表。
 
 - `UNIQUE(owner_username, name)`
 
+使用规则：
+
+- VM 创建和普通用户编辑时只能引用当前登录用户自己的 security group。
+- 管理员从 `Admin / All VMs` 编辑或接管 VM 时，前端按目标 owner 过滤 security group；后端也按目标 owner 校验，防止把其他用户的 security group 写入 VM。
+
 ## templates
 
 worker 从 PVE `template-pool` 扫描出来的模板记录。
