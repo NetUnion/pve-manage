@@ -186,8 +186,10 @@ func (c *Client) SetPoolVMs(ctx context.Context, clusterKey, poolID string, vmid
 	if err != nil {
 		return err
 	}
-	pool := &proxmox.Pool{PoolID: poolID}
-	if err := client.Put(ctx, "/pools/"+url.PathEscape(pool.PoolID), &proxmox.PoolUpdateOption{VirtualMachines: strings.Join(parts, ",")}, nil); err != nil {
+	if err := c.request(ctx, clusterKey, http.MethodPut, "/pools/"+url.PathEscape(poolID), url.Values{
+		"vms":        {strings.Join(parts, ",")},
+		"allow-move": {"1"},
+	}, nil); err != nil {
 		if isAlreadyExistsErr(err) {
 			return nil
 		}
