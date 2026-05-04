@@ -951,11 +951,11 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET vmname = ?, ip = ?, node = COALESCE(node, ?), password = ?, sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
+		SET owner_username = ?, vmname = ?, ip = ?, node = COALESCE(node, ?), password = ?, sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
 		    uestc_restricted = ?, quota_exempt = ?, config_json = ?, prefer_status_json = ?, sync_state = 'pending',
 		    sync_error = NULL, version = version + 1, updated_at = ?
 		WHERE id = ?
-	`, vm.VMName, vm.IP, vm.Node, vm.Password, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), boolToInt(vm.QuotaExempt), string(cfgBytes), string(preferBytes), now, vm.ID)
+	`, vm.OwnerUsername, vm.VMName, vm.IP, vm.Node, vm.Password, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), boolToInt(vm.QuotaExempt), string(cfgBytes), string(preferBytes), now, vm.ID)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return

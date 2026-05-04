@@ -639,6 +639,9 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 			return err
 		}
 	}
+	if err := w.ensureOwnerPoolMembership(ctx, vm); err != nil {
+		return err
+	}
 	if err := w.configureVM(ctx, vm, prefer, cluster, node); err != nil {
 		return err
 	}
@@ -667,6 +670,14 @@ func (w *Worker) syncPresent(ctx context.Context, vm vmRow, prefer map[string]an
 		"last_synced_at": timestamp(),
 	})
 	return err
+}
+
+func (w *Worker) ensureOwnerPoolMembership(ctx context.Context, vm vmRow) error {
+	poolID := userPoolID(vm.OwnerUsername)
+	if err := w.pve.EnsurePool(ctx, vm.ClusterKey, poolID); err != nil {
+		return err
+	}
+	return w.pve.SetPoolVMs(ctx, vm.ClusterKey, poolID, vm.VMID)
 }
 
 func (w *Worker) rollbackProvision(ctx context.Context, vm vmRow, node string) error {
