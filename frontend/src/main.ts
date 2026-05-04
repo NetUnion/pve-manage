@@ -2399,8 +2399,8 @@ async function loadAdminUsers() {
   renderUsers()
 }
 
-async function loadAdminVMs() {
-  if (!state.me?.is_admin || state.allVMs.length) return
+async function loadAdminVMs(force = false) {
+  if (!state.me?.is_admin || (state.allVMs.length && !force)) return
   const data = await api<{ items: VM[] }>('/api/admin/vms')
   state.allVMs = data.items
   renderAdminVMs()
@@ -2432,7 +2432,7 @@ async function refreshVMViews() {
   renderSummary()
   if (state.me?.is_admin && state.adminTab === 'vms') {
     state.allVMs = []
-    await loadAdminVMs()
+    await loadAdminVMs(true)
   }
 }
 
@@ -2455,11 +2455,11 @@ async function loadActiveTab() {
     case 'vm-detail':
       if (state.detailVmId) await openDetailById(state.detailVmId)
       break
-  case 'admin':
+    case 'admin':
       if (state.adminTab === 'users') {
         await loadAdminUsers()
       } else if (state.adminTab === 'vms') {
-        await loadAdminVMs()
+        await loadAdminVMs(true)
       } else if (state.adminTab === 'security-groups') {
         await loadAdminSecurityGroups()
       } else if (state.adminTab === 'maintenance') {
@@ -2473,15 +2473,24 @@ async function loadActiveTab() {
 
 function startVmAutoRefresh() {
   window.setInterval(async () => {
-    if (!state.me || (state.activeTab !== 'vms' && state.activeTab !== 'vm-detail') || document.visibilityState !== 'visible') {
+    const refreshUserVMs = state.me && state.activeTab === 'vms' && document.visibilityState === 'visible'
+    const refreshDetail = state.me && state.activeTab === 'vm-detail' && document.visibilityState === 'visible'
+    const refreshAdminVMs = state.me && state.activeTab === 'admin' && state.adminTab === 'vms' && document.visibilityState === 'visible'
+    if (!refreshUserVMs && !refreshDetail && !refreshAdminVMs) {
       return
     }
     try {
-      await loadVMs()
-      renderSummary()
-      if (state.activeTab === 'vm-detail' && state.detailVmId) {
+      if (refreshUserVMs) {
+        await loadVMs()
+        renderSummary()
+      }
+      if (refreshDetail && state.detailVmId) {
         const detail = await api<VM>(`/api/vms/${state.detailVmId}`)
         renderDetail(detail)
+      }
+      if (refreshAdminVMs) {
+        state.allVMs = []
+        await loadAdminVMs(true)
       }
     } catch (err) {
       flash((err as Error).message, 'error')

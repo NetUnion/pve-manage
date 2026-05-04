@@ -288,34 +288,15 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	}
 
 	for _, migration := range migrations {
-		applied, err := migrationApplied(ctx, db, migration.Version)
+		conn, err := db.Conn(ctx)
 		if err != nil {
 			return err
 		}
-		if applied {
-			continue
-		}
-
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
+		if err := applyMigration(ctx, conn, migration); err != nil {
+			_ = conn.Close()
 			return err
 		}
-
-		if _, err := tx.ExecContext(ctx, migration.SQL); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply migration %d (%s): %w", migration.Version, migration.Name, err)
-		}
-
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO schema_migrations(version, name) VALUES(?, ?)`,
-			migration.Version,
-			migration.Name,
-		); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record migration %d (%s): %w", migration.Version, migration.Name, err)
-		}
-
-		if err := tx.Commit(); err != nil {
+		if err := conn.Close(); err != nil {
 			return err
 		}
 	}
@@ -323,7 +304,54 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func migrationApplied(ctx context.Context, db *sql.DB, version int) (bool, error) {
+type migrationQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func applyMigration(ctx context.Context, conn *sql.Conn, migration Migration) error {
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
+	applied, err := migrationApplied(ctx, conn, migration.Version)
+	if err != nil {
+		return err
+	}
+	if applied {
+		if _, err := conn.ExecContext(ctx, `ROLLBACK`); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	}
+
+	if _, err := conn.ExecContext(ctx, migration.SQL); err != nil {
+		return fmt.Errorf("apply migration %d (%s): %w", migration.Version, migration.Name, err)
+	}
+
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO schema_migrations(version, name) VALUES(?, ?)`,
+		migration.Version,
+		migration.Name,
+	); err != nil {
+		return fmt.Errorf("record migration %d (%s): %w", migration.Version, migration.Name, err)
+	}
+
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func migrationApplied(ctx context.Context, db migrationQuerier, version int) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations WHERE version = ?`, version).Scan(&count); err != nil {
 		return false, err
