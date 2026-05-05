@@ -477,11 +477,15 @@ func normalizeSSHKeyLine(value string) (string, error) {
 	if value == "" || strings.HasPrefix(value, "#") {
 		return "", nil
 	}
-	pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(value))
+	pub, comment, _, _, err := ssh.ParseAuthorizedKey([]byte(value))
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub))), nil
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+	if comment != "" {
+		line += " " + comment
+	}
+	return line, nil
 }
 
 func validSecurityGroupName(name string) bool {
