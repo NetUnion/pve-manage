@@ -503,7 +503,7 @@ func (w *Worker) markTaskDone(ctx context.Context, taskID int64) error {
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
-		SET status = 'done', finished_at = COALESCE(finished_at, ?), updated_at = ?
+		SET status = 'done', error = NULL, finished_at = COALESCE(finished_at, ?), updated_at = ?
 		WHERE id = ?
 	`, now, now, taskID)
 	return err

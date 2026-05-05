@@ -1752,6 +1752,7 @@ function renderAdminVMTasks() {
         <col class="col-admin-metric" />
         <col class="col-admin-metric" />
         <col class="col-admin-metric" />
+        <col class="col-admin-metric" />
       </colgroup>
       <thead>
         <tr>
@@ -1763,7 +1764,8 @@ function renderAdminVMTasks() {
           <th>Managed</th>
           <th>超限</th>
           <th>Task</th>
-          <th>Status</th>
+          <th>Task Status</th>
+          <th>VM Sync</th>
           <th>Created</th>
           <th>Updated</th>
         </tr>
@@ -1787,7 +1789,9 @@ function renderAdminVMTasks() {
                 </td>
                 <td>
                   ${taskStatusBadge(task.status)}
-                  <div class="mono task-state">${escapeHtml(task.sync_state)}</div>
+                </td>
+                <td>
+                  ${statusBadge(task.sync_state)}
                 </td>
                 <td>${escapeHtml(formatTime(task.created_at))}</td>
                 <td>${escapeHtml(formatTime(task.updated_at))}</td>
