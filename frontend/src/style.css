@@ -314,6 +314,12 @@ select {
   flex-wrap: wrap;
 }
 
+.subpanel-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
 .input {
   width: 100%;
   background: var(--panel);

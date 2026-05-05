@@ -120,6 +120,11 @@ type VMTableSortKey =
   | 'disk_io'
   | 'network'
 
+type VMTableSort = {
+  key: VMTableSortKey
+  dir: 'asc' | 'desc'
+}
+
 type AppTab = 'vms' | 'security' | 'ssh' | 'templates' | 'admin' | 'vm-detail'
 
 type AdminTab = 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance'
@@ -227,8 +232,8 @@ const state = {
   users: [] as UserRow[],
   activeTab: 'vms' as AppTab,
   adminTab: 'users' as AdminTab,
-  vmSort: { key: 'updated' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' },
-  adminVmSort: { key: 'cpu' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' },
+  vmSort: [{ key: 'updated' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' }],
+  adminVmSort: [{ key: 'cpu' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' }],
   detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
@@ -315,7 +320,8 @@ app.innerHTML = `
               <h2>虚拟机</h2>
               <p>列出你拥有或共享管理的 VM。</p>
             </div>
-            <div class="panel-actions">
+          <div class="panel-actions">
+              <button id="refresh-vm-btn" class="btn btn-ghost">刷新</button>
               <button id="create-vm-btn" class="btn btn-primary">新建 VM</button>
             </div>
           </div>
@@ -342,6 +348,7 @@ app.innerHTML = `
               <p>管理你自己的安全组规则。</p>
             </div>
             <div class="panel-actions">
+              <button id="refresh-security-btn" class="btn btn-ghost">刷新</button>
               <button id="create-sg-btn" class="btn btn-primary">新建安全组</button>
             </div>
           </div>
@@ -355,6 +362,7 @@ app.innerHTML = `
               <p>保存常用 SSH 公钥，创建 VM 时直接选择。</p>
             </div>
             <div class="panel-actions">
+              <button id="refresh-ssh-btn" class="btn btn-ghost">刷新</button>
               <button id="create-ssh-btn" class="btn btn-primary">新增 SSH Key</button>
             </div>
           </div>
@@ -367,6 +375,9 @@ app.innerHTML = `
               <h2>Templates</h2>
               <p>Worker 上报的可用模板。</p>
             </div>
+            <div class="panel-actions">
+              <button id="refresh-templates-btn" class="btn btn-ghost">刷新</button>
+            </div>
           </div>
           <div id="template-table" class="table-wrap"></div>
         </section>
@@ -376,6 +387,9 @@ app.innerHTML = `
             <div>
               <h2>Admin</h2>
               <p>查看全局 VM、用户并修改 IP。</p>
+            </div>
+            <div class="panel-actions">
+              <button id="refresh-admin-btn" class="btn btn-ghost">刷新</button>
             </div>
           </div>
           <div class="subtabs">
@@ -574,6 +588,11 @@ const els = {
   adminSecurityGroupTable: $('#admin-security-group-table'),
   adminSshKeyTable: $('#admin-ssh-key-table'),
   adminMaintenanceTable: $('#admin-maintenance-table'),
+  refreshVmBtn: $('#refresh-vm-btn'),
+  refreshSecurityBtn: $('#refresh-security-btn'),
+  refreshSshBtn: $('#refresh-ssh-btn'),
+  refreshTemplatesBtn: $('#refresh-templates-btn'),
+  refreshAdminBtn: $('#refresh-admin-btn'),
   createVmBtn: $('#create-vm-btn'),
   createSgBtn: $('#create-sg-btn'),
   tabs: Array.from(document.querySelectorAll<HTMLButtonElement>('.tab')),
@@ -1637,11 +1656,14 @@ function renderAdminVMs() {
   scheduleScrollableTextRefresh(els.adminVmTable)
 }
 
-function sortVMs(items: VM[], sort: { key: VMTableSortKey; dir: 'asc' | 'desc' }): VM[] {
-  const direction = sort.dir === 'asc' ? 1 : -1
+function sortVMs(items: VM[], sorts: VMTableSort[]): VM[] {
+  const activeSorts = sorts.length ? sorts : [{ key: 'updated' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' }]
   return [...items].sort((a, b) => {
-    const result = compareSortableValues(vmSortValue(a, sort.key), vmSortValue(b, sort.key))
-    if (result !== 0) return result * direction
+    for (let i = activeSorts.length - 1; i >= 0; i--) {
+      const sort = activeSorts[i]
+      const result = compareSortableValues(vmSortValue(a, sort.key), vmSortValue(b, sort.key))
+      if (result !== 0) return sort.dir === 'asc' ? result : -result
+    }
     return a.vmid - b.vmid
   })
 }
@@ -1695,16 +1717,32 @@ function defaultVmSortDir(key: VMTableSortKey): 'asc' | 'desc' {
   return key === 'updated' || key === 'cpu' || key === 'memory' || key === 'disk_io' || key === 'network' ? 'desc' : 'asc'
 }
 
+function updateSortState(current: VMTableSort[], key: VMTableSortKey): VMTableSort[] {
+  const index = current.findIndex((item) => item.key === key)
+  if (index === -1) {
+    return [...current, { key, dir: defaultVmSortDir(key) }]
+  }
+  const next = current.filter((_, i) => i !== index)
+  const existing = current[index]
+  const dir = index === current.length - 1 ? (existing.dir === 'asc' ? 'desc' : 'asc') : existing.dir
+  next.push({ key, dir })
+  return next
+}
+
+function sortMarker(sorts: VMTableSort[], key: VMTableSortKey): string {
+  const index = sorts.map((item) => item.key).lastIndexOf(key)
+  if (index === -1) return ''
+  const sort = sorts[index]
+  const rank = sorts.length - index
+  return ` ${sort.dir === 'asc' ? '↑' : '↓'}${rank}`
+}
+
 function vmSortButton(key: VMTableSortKey, label: string): string {
-  const active = state.vmSort.key === key
-  const marker = active ? (state.vmSort.dir === 'asc' ? ' ↑' : ' ↓') : ''
-  return `<button class="table-sort" data-vm-sort="${key}" type="button">${escapeHtml(label + marker)}</button>`
+  return `<button class="table-sort" data-vm-sort="${key}" type="button">${escapeHtml(label + sortMarker(state.vmSort, key))}</button>`
 }
 
 function adminVmSortButton(key: VMTableSortKey, label: string): string {
-  const active = state.adminVmSort.key === key
-  const marker = active ? (state.adminVmSort.dir === 'asc' ? ' ↑' : ' ↓') : ''
-  return `<button class="table-sort" data-admin-vm-sort="${key}" type="button">${escapeHtml(label + marker)}</button>`
+  return `<button class="table-sort" data-admin-vm-sort="${key}" type="button">${escapeHtml(label + sortMarker(state.adminVmSort, key))}</button>`
 }
 
 function renderAdminSecurityGroups() {
@@ -2538,8 +2576,8 @@ async function loadTemplates() {
   renderTemplates()
 }
 
-async function loadAdminUsers() {
-  if (!state.me?.is_admin || state.users.length) return
+async function loadAdminUsers(force = false) {
+  if (!state.me?.is_admin || (state.users.length && !force)) return
   const data = await api<{ items: UserRow[] }>('/api/admin/users')
   state.users = data.items
   renderUsers()
@@ -2552,22 +2590,22 @@ async function loadAdminVMs(force = false) {
   renderAdminVMs()
 }
 
-async function loadAdminSecurityGroups() {
-  if (!state.me?.is_admin || state.adminSecurityGroups.length) return
+async function loadAdminSecurityGroups(force = false) {
+  if (!state.me?.is_admin || (state.adminSecurityGroups.length && !force)) return
   const data = await api<{ items: SecurityGroup[] }>('/api/admin/security-groups')
   state.adminSecurityGroups = data.items
   renderAdminSecurityGroups()
 }
 
-async function loadAdminSSHKeys() {
-  if (!state.me?.is_admin || state.adminSSHKeys.length) return
+async function loadAdminSSHKeys(force = false) {
+  if (!state.me?.is_admin || (state.adminSSHKeys.length && !force)) return
   const data = await api<{ items: SSHKey[] }>('/api/admin/ssh-keys')
   state.adminSSHKeys = data.items
   renderAdminSSHKeys()
 }
 
-async function loadAdminMaintenance() {
-  if (!state.me?.is_admin || state.maintenanceTasks.length) return
+async function loadAdminMaintenance(force = false) {
+  if (!state.me?.is_admin || (state.maintenanceTasks.length && !force)) return
   const data = await api<{ items: MaintenanceTask[] }>('/api/admin/maintenance-tasks')
   state.maintenanceTasks = data.items
   renderAdminMaintenance()
@@ -2603,15 +2641,15 @@ async function loadActiveTab() {
       break
     case 'admin':
       if (state.adminTab === 'users') {
-        await loadAdminUsers()
+        await loadAdminUsers(true)
       } else if (state.adminTab === 'vms') {
         await loadAdminVMs(true)
       } else if (state.adminTab === 'security-groups') {
-        await loadAdminSecurityGroups()
+        await loadAdminSecurityGroups(true)
       } else if (state.adminTab === 'maintenance') {
-        await loadAdminMaintenance()
+        await loadAdminMaintenance(true)
       } else {
-        await loadAdminSSHKeys()
+        await loadAdminSSHKeys(true)
       }
       break
   }
@@ -2619,24 +2657,14 @@ async function loadActiveTab() {
 
 function startVmAutoRefresh() {
   window.setInterval(async () => {
-    const refreshUserVMs = state.me && state.activeTab === 'vms' && document.visibilityState === 'visible'
     const refreshDetail = state.me && state.activeTab === 'vm-detail' && document.visibilityState === 'visible'
-    const refreshAdminVMs = state.me && state.activeTab === 'admin' && state.adminTab === 'vms' && document.visibilityState === 'visible'
-    if (!refreshUserVMs && !refreshDetail && !refreshAdminVMs) {
+    if (!refreshDetail) {
       return
     }
     try {
-      if (refreshUserVMs) {
-        await loadVMs()
-        renderSummary()
-      }
       if (refreshDetail && state.detailVmId) {
         const detail = await api<VM>(`/api/vms/${state.detailVmId}`)
         renderDetail(detail)
-      }
-      if (refreshAdminVMs) {
-        state.allVMs = []
-        await loadAdminVMs(true)
       }
     } catch (err) {
       flash((err as Error).message, 'error')
@@ -3090,11 +3118,7 @@ function bindEvents() {
     const adminVmSort = target.closest<HTMLElement>('[data-admin-vm-sort]')
     if (adminVmSort) {
       const key = adminVmSort.dataset.adminVmSort as VMTableSortKey
-      if (state.adminVmSort.key === key) {
-        state.adminVmSort.dir = state.adminVmSort.dir === 'asc' ? 'desc' : 'asc'
-      } else {
-        state.adminVmSort = { key, dir: defaultVmSortDir(key) }
-      }
+      state.adminVmSort = updateSortState(state.adminVmSort, key)
       renderAdminVMs()
       return
     }
@@ -3102,12 +3126,69 @@ function bindEvents() {
     const vmSort = target.closest<HTMLElement>('[data-vm-sort]')
     if (vmSort) {
       const key = vmSort.dataset.vmSort as VMTableSortKey
-      if (state.vmSort.key === key) {
-        state.vmSort.dir = state.vmSort.dir === 'asc' ? 'desc' : 'asc'
-      } else {
-        state.vmSort = { key, dir: defaultVmSortDir(key) }
-      }
+      state.vmSort = updateSortState(state.vmSort, key)
       renderVmTable()
+      return
+    }
+
+    if (target.closest('#refresh-vm-btn')) {
+      try {
+        await loadVMs()
+        renderSummary()
+        renderVmTable()
+      } catch (err) {
+        flash((err as Error).message, 'error')
+      }
+      return
+    }
+
+    if (target.closest('#refresh-security-btn')) {
+      try {
+        state.securityGroups = []
+        await loadSecurityGroups()
+      } catch (err) {
+        flash((err as Error).message, 'error')
+      }
+      return
+    }
+
+    if (target.closest('#refresh-ssh-btn')) {
+      try {
+        state.sshKeys = []
+        await loadSSHKeys()
+      } catch (err) {
+        flash((err as Error).message, 'error')
+      }
+      return
+    }
+
+    if (target.closest('#refresh-templates-btn')) {
+      try {
+        state.templates = []
+        await loadTemplates()
+      } catch (err) {
+        flash((err as Error).message, 'error')
+      }
+      return
+    }
+
+    if (target.closest('#refresh-admin-btn')) {
+      try {
+        if (state.adminTab === 'users') {
+          state.users = []
+        } else if (state.adminTab === 'vms') {
+          state.allVMs = []
+        } else if (state.adminTab === 'security-groups') {
+          state.adminSecurityGroups = []
+        } else if (state.adminTab === 'ssh-keys') {
+          state.adminSSHKeys = []
+        } else if (state.adminTab === 'maintenance') {
+          state.maintenanceTasks = []
+        }
+        await loadActiveTab()
+      } catch (err) {
+        flash((err as Error).message, 'error')
+      }
       return
     }
 
