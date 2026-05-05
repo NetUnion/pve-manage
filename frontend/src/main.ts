@@ -88,6 +88,7 @@ type VM = {
   delete_requested_at?: string | null
   delete_execute_after?: string | null
   password?: string
+  console_url?: string
   tasks?: VMTask[]
   metrics?: VMMetrics | null
   metrics_history?: VMMetricPoint[]
@@ -2265,8 +2266,22 @@ function renderDetail(vm: VM) {
   const deleteInfo = isDeletePending(vm)
     ? `<div><span class="label">删除时间</span><div>${escapeHtml(formatTime(vm.delete_execute_after))}</div></div>`
     : ''
-  const passwordBlock = vm.password
-    ? `<div class="detail-block"><h4>Login Password</h4><div class="mono password-value">${escapeHtml(vm.password)}</div></div>`
+  const accessItems = [
+    vm.password
+      ? `<div>
+          <span class="label">Login Password</span>
+          <div class="mono password-value">${escapeHtml(vm.password)}</div>
+        </div>`
+      : '',
+    vm.console_url
+      ? `<div>
+          <span class="label">Console</span>
+          <div><a class="btn btn-ghost detail-link" href="${escapeHtml(vm.console_url)}" target="_blank" rel="noreferrer noopener">打开 PVE Console</a></div>
+        </div>`
+      : '',
+  ].filter(Boolean) as string[]
+  const accessBlock = accessItems.length
+    ? `<div class="detail-block"><h4>Access</h4><div class="detail-access-grid">${accessItems.join('')}</div></div>`
     : ''
   const cpuKey = configString(vm.config, 'cpu_key', configString(vm.config, 'pve_cpu'))
   const storageKey = configString(vm.config, 'storage_key')
@@ -2300,7 +2315,7 @@ function renderDetail(vm: VM) {
       <div><span class="label">任务队列</span><div>${vm.task_queue_paused ? '<span class="badge warn">已暂停</span>' : '<span class="badge ok">运行中</span>'}</div></div>
       ${deleteInfo}
     </div>
-    ${passwordBlock}
+    ${accessBlock}
     <div class="detail-block">
       <h4>Network</h4>
       <div class="detail-network">

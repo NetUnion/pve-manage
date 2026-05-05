@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -1208,6 +1209,22 @@ func (vm *vmSummary) SharedUsernamesToJSON() string {
 
 func (s *Server) vmVisibleToCurrentUser(vm *vmSummary, current *model.User) bool {
 	return current.IsAdmin || current.Username == vm.OwnerUsername || containsString(vm.SharedUsernames, current.Username)
+}
+
+func (s *Server) vmConsoleURL(vm *vmSummary) string {
+	if vm == nil {
+		return ""
+	}
+	token, ok := s.config.Tokens.Cluster[vm.ClusterKey]
+	if !ok {
+		return ""
+	}
+	site := strings.TrimSpace(token.Site)
+	if site == "" {
+		return ""
+	}
+	ref := url.PathEscape(fmt.Sprintf("qemu/%d", vm.VMID))
+	return fmt.Sprintf("%s/#v1:0:=%s:4::::30:8::", strings.TrimRight(site, "/"), ref)
 }
 
 func parseVMMetricPoints(raw string) []vmMetricPoint {

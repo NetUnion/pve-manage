@@ -108,8 +108,9 @@ type createVMResponse struct {
 
 type vmDetailResponse struct {
 	VM
-	Password string          `json:"password"`
-	Tasks    []vmTaskSummary `json:"tasks"`
+	Password   string          `json:"password"`
+	ConsoleURL string          `json:"console_url,omitempty"`
+	Tasks      []vmTaskSummary `json:"tasks"`
 }
 
 func queueVMPowerTaskTx(ctx context.Context, tx *sql.Tx, vm *vmSummary, action string) error {
@@ -237,6 +238,12 @@ func (s *Server) handleGetVM(w http.ResponseWriter, r *http.Request) {
 		Password: func() string {
 			if current.Username == vm.OwnerUsername {
 				return vm.Password
+			}
+			return ""
+		}(),
+		ConsoleURL: func() string {
+			if current.Username == vm.OwnerUsername {
+				return s.vmConsoleURL(vm)
 			}
 			return ""
 		}(),
