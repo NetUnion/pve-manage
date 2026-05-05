@@ -310,6 +310,10 @@ app.innerHTML = `
               <span class="menu-title">Admin</span>
               <span class="menu-subtitle">管理</span>
             </button>
+            <button id="guide-btn" class="tab" type="button">
+              <span class="menu-title">Guide</span>
+              <span class="menu-subtitle">帮助</span>
+            </button>
           </nav>
         </div>
         <div class="sidebar-section sidebar-foot">
@@ -590,6 +594,7 @@ const els = {
   loadingIndicator: $('#loading-indicator') as HTMLDivElement,
   loginBtn: $('#login-btn'),
   logoutBtn: $('#logout-btn'),
+  guideBtn: $('#guide-btn'),
   vmTable: $('#vm-table'),
   sgTable: $('#sg-table'),
   templateTable: $('#template-table'),
@@ -3065,6 +3070,9 @@ function bindEvents() {
     } finally {
       endLoading()
     }
+  })
+  els.guideBtn.addEventListener('click', () => {
+    window.open('https://outline.netunion.org/s/49a532e9-d41f-4b10-b9a3-11ee71ddb9b1', '_blank', 'noopener,noreferrer')
   })
   els.tabs.forEach((tab) => {
     tab.addEventListener('click', async () => {
