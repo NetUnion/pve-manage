@@ -232,8 +232,11 @@ const state = {
   users: [] as UserRow[],
   activeTab: 'vms' as AppTab,
   adminTab: 'users' as AdminTab,
-  vmSort: [{ key: 'updated' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' }],
-  adminVmSort: [{ key: 'cpu' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' }],
+  vmSort: [{ key: 'name' as VMTableSortKey, dir: 'asc' as 'asc' | 'desc' }],
+  adminVmSort: [
+    { key: 'vmid' as VMTableSortKey, dir: 'asc' as 'asc' | 'desc' },
+    { key: 'cluster' as VMTableSortKey, dir: 'asc' as 'asc' | 'desc' },
+  ],
   adminShowLowVmid: false,
   detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
