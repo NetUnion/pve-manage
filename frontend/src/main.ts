@@ -234,6 +234,7 @@ const state = {
   adminTab: 'users' as AdminTab,
   vmSort: [{ key: 'updated' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' }],
   adminVmSort: [{ key: 'cpu' as VMTableSortKey, dir: 'desc' as 'asc' | 'desc' }],
+  adminShowLowVmid: false,
   detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
@@ -389,6 +390,11 @@ app.innerHTML = `
               <p>查看全局 VM、用户并修改 IP。</p>
             </div>
             <div class="panel-actions">
+              <label id="admin-vms-controls" class="switch-row admin-vm-toggle hidden" title="显示小于 start_vmid 的项目">
+                <input id="admin-show-low-vmid" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-text">显示小于 start_vmid 的项目</span>
+              </label>
               <button id="refresh-admin-btn" class="btn btn-ghost">刷新</button>
             </div>
           </div>
@@ -1126,11 +1132,15 @@ function renderTabs() {
   const adminSecurityGroupsPanel = document.getElementById('admin-security-groups-panel')
   const adminSshKeysPanel = document.getElementById('admin-ssh-keys-panel')
   const adminMaintenancePanel = document.getElementById('admin-maintenance-panel')
+  const adminRefreshBtn = document.getElementById('refresh-admin-btn')
+  const adminVmsControls = document.getElementById('admin-vms-controls')
   adminUsersPanel?.classList.toggle('active', state.adminTab === 'users')
   adminVmsPanel?.classList.toggle('active', state.adminTab === 'vms')
   adminSecurityGroupsPanel?.classList.toggle('active', state.adminTab === 'security-groups')
   adminSshKeysPanel?.classList.toggle('active', state.adminTab === 'ssh-keys')
   adminMaintenancePanel?.classList.toggle('active', state.adminTab === 'maintenance')
+  adminRefreshBtn?.classList.toggle('hidden', state.activeTab !== 'admin')
+  adminVmsControls?.classList.toggle('hidden', state.activeTab !== 'admin' || state.adminTab !== 'vms')
 }
 
 function renderVmTable() {
@@ -1603,11 +1613,12 @@ function renderAdminVMs() {
     els.adminVmTable.innerHTML = `<div class="empty">管理员可见。</div>`
     return
   }
-  if (!state.allVMs.length) {
+  const visible = state.allVMs.filter((vm) => adminVmVisible(vm))
+  if (!visible.length) {
     els.adminVmTable.innerHTML = `<div class="empty">没有 VM。</div>`
     return
   }
-  const items = sortVMs(state.allVMs, state.adminVmSort)
+  const items = sortVMs(visible, state.adminVmSort)
   els.adminVmTable.innerHTML = `
     <table class="admin-vm-table">
       <colgroup>
@@ -1666,6 +1677,14 @@ function sortVMs(items: VM[], sorts: VMTableSort[]): VM[] {
     }
     return a.vmid - b.vmid
   })
+}
+
+function adminVmVisible(vm: VM): boolean {
+  if (!state.adminShowLowVmid) {
+    const cluster = getCluster(vm.cluster_key)
+    if (cluster && vm.vmid < cluster.start_vmid) return false
+  }
+  return true
 }
 
 function vmSortValue(vm: VM, key: VMTableSortKey): string | number | boolean | null {
@@ -3128,6 +3147,13 @@ function bindEvents() {
     if (adminVmSort) {
       const key = adminVmSort.dataset.adminVmSort as VMTableSortKey
       state.adminVmSort = updateSortState(state.adminVmSort, key)
+      renderAdminVMs()
+      return
+    }
+
+    const adminShowLowVmid = target.closest<HTMLInputElement>('#admin-show-low-vmid')
+    if (adminShowLowVmid) {
+      state.adminShowLowVmid = adminShowLowVmid.checked
       renderAdminVMs()
       return
     }
