@@ -2620,6 +2620,12 @@ async function refreshVMViews() {
   }
 }
 
+async function refreshVmSummary() {
+  const data = await api<{ items: VM[] }>('/api/vms')
+  state.vms = data.items
+  renderSummary()
+}
+
 async function loadActiveTab() {
   if (!state.me) return
   switch (state.activeTab) {
@@ -2658,13 +2664,16 @@ async function loadActiveTab() {
 function startVmAutoRefresh() {
   window.setInterval(async () => {
     const refreshDetail = state.me && state.activeTab === 'vm-detail' && document.visibilityState === 'visible'
-    if (!refreshDetail) {
+    const refreshSummary = state.me && state.activeTab !== 'vm-detail' && document.visibilityState === 'visible'
+    if (!refreshDetail && !refreshSummary) {
       return
     }
     try {
       if (refreshDetail && state.detailVmId) {
         const detail = await api<VM>(`/api/vms/${state.detailVmId}`)
         renderDetail(detail)
+      } else if (refreshSummary) {
+        await refreshVmSummary()
       }
     } catch (err) {
       flash((err as Error).message, 'error')
