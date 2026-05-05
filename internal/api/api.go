@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	r.Delete("/api/security-groups/{name}", s.handleDeleteSecurityGroup)
 	r.Get("/api/templates", s.handleListTemplates)
 	r.Get("/api/admin/vms", s.handleAdminListVMs)
+	r.Get("/api/admin/vm-tasks", s.handleAdminListVMTasks)
 	r.Get("/api/admin/users", s.handleAdminListUsers)
 	r.Get("/api/admin/security-groups", s.handleAdminListSecurityGroups)
 	r.Get("/api/admin/ssh-keys", s.handleAdminListSSHKeys)

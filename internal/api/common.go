@@ -127,6 +127,28 @@ type vmTaskSummary struct {
 	FinishedAt *string         `json:"finished_at,omitempty"`
 }
 
+type adminVMTaskSummary struct {
+	ID            int64           `json:"id"`
+	VMRecordID    int64           `json:"vm_id"`
+	Seq           int             `json:"seq"`
+	Kind          string          `json:"kind"`
+	Payload       json.RawMessage `json:"payload"`
+	Status        string          `json:"status"`
+	Error         *string         `json:"error,omitempty"`
+	CreatedAt     string          `json:"created_at"`
+	UpdatedAt     string          `json:"updated_at"`
+	StartedAt     *string         `json:"started_at,omitempty"`
+	FinishedAt    *string         `json:"finished_at,omitempty"`
+	OwnerUsername string          `json:"owner_username"`
+	ClusterKey    string          `json:"cluster_key"`
+	VMID          int             `json:"vmid"`
+	VMName        string          `json:"vmname"`
+	Node          string          `json:"node"`
+	Managed       bool            `json:"managed"`
+	QuotaExempt   bool            `json:"quota_exempt"`
+	SyncState     string          `json:"sync_state"`
+}
+
 type maintenanceTaskSummary struct {
 	ID         int64           `json:"id"`
 	Kind       string          `json:"kind"`
@@ -257,6 +279,47 @@ func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, 
 		var startedAt sql.NullString
 		var finishedAt sql.NullString
 		if err := rows.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
+			return nil, err
+		}
+		item.Payload = rawJSONFromString(payloadRaw)
+		if startedAt.Valid {
+			value := startedAt.String
+			item.StartedAt = &value
+		}
+		if finishedAt.Valid {
+			value := finishedAt.String
+			item.FinishedAt = &value
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Server) loadAllVMTasks(ctx context.Context, includeCompleted bool) ([]adminVMTaskSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			vt.id, vt.vm_id, vt.seq, vt.kind, vt.payload_json, vt.status, vt.error, vt.created_at, vt.updated_at, vt.started_at, vt.finished_at,
+			v.owner_username, v.cluster_key, v.vmid, v.vmname, v.node, v.managed, v.quota_exempt, v.sync_state
+		FROM vm_tasks vt
+		JOIN vms v ON v.id = vt.vm_id
+		WHERE (? = 1 OR vt.status <> 'done')
+		ORDER BY vt.created_at DESC, vt.id DESC
+	`, boolToInt(includeCompleted))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]adminVMTaskSummary, 0)
+	for rows.Next() {
+		var item adminVMTaskSummary
+		var payloadRaw string
+		var startedAt sql.NullString
+		var finishedAt sql.NullString
+		if err := rows.Scan(
+			&item.ID, &item.VMRecordID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt,
+			&item.OwnerUsername, &item.ClusterKey, &item.VMID, &item.VMName, &item.Node, &item.Managed, &item.QuotaExempt, &item.SyncState,
+		); err != nil {
 			return nil, err
 		}
 		item.Payload = rawJSONFromString(payloadRaw)

@@ -128,7 +128,7 @@ type VMTableSort = {
 
 type AppTab = 'vms' | 'security' | 'ssh' | 'templates' | 'admin' | 'vm-detail'
 
-type AdminTab = 'users' | 'vms' | 'security-groups' | 'ssh-keys' | 'maintenance'
+type AdminTab = 'users' | 'vms' | 'vm-tasks' | 'security-groups' | 'ssh-keys' | 'maintenance'
 
 type VMMetricPoint = {
   time: string
@@ -152,6 +152,28 @@ type VMTask = {
   updated_at: string
   started_at?: string | null
   finished_at?: string | null
+}
+
+type AdminVMTask = {
+  id: number
+  vm_id: number
+  seq: number
+  kind: string
+  payload: Record<string, unknown>
+  status: string
+  error?: string | null
+  created_at: string
+  updated_at: string
+  started_at?: string | null
+  finished_at?: string | null
+  owner_username: string
+  cluster_key: string
+  vmid: number
+  vmname: string
+  node?: string
+  managed: boolean
+  quota_exempt: boolean
+  sync_state: string
 }
 
 type MaintenanceTask = {
@@ -229,6 +251,7 @@ const state = {
   sshKeys: [] as SSHKey[],
   adminSSHKeys: [] as SSHKey[],
   maintenanceTasks: [] as MaintenanceTask[],
+  adminVMTasks: [] as AdminVMTask[],
   templates: [] as Template[],
   users: [] as UserRow[],
   activeTab: 'vms' as AppTab,
@@ -239,6 +262,7 @@ const state = {
     { key: 'cluster' as VMTableSortKey, dir: 'asc' as 'asc' | 'desc' },
   ],
   adminShowLowVmid: false,
+  adminShowCompletedTasks: false,
   detailVM: null as VM | null,
   vmDialogMode: 'create' as 'create' | 'edit' | 'adopt',
   vmDialogVm: null as VM | null,
@@ -403,12 +427,18 @@ app.innerHTML = `
                 <span class="switch-track" aria-hidden="true"></span>
                 <span class="switch-text">显示小于 start_vmid 的项目</span>
               </label>
+              <label id="admin-vm-task-controls" class="switch-row admin-vm-toggle hidden" title="显示已完成任务">
+                <input id="admin-show-completed-tasks" type="checkbox" />
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-text">显示已完成任务</span>
+              </label>
               <button id="refresh-admin-btn" class="btn btn-ghost">刷新</button>
             </div>
           </div>
           <div class="subtabs">
             <button class="subtab active" data-admin-tab="users">Users</button>
             <button class="subtab" data-admin-tab="vms">All VMs</button>
+            <button class="subtab" data-admin-tab="vm-tasks">All VM Tasks</button>
             <button class="subtab" data-admin-tab="security-groups">All Security Groups</button>
             <button class="subtab" data-admin-tab="ssh-keys">All SSH Keys</button>
             <button class="subtab" data-admin-tab="maintenance">Maintenance</button>
@@ -418,6 +448,9 @@ app.innerHTML = `
           </div>
           <div id="admin-vms-panel" class="subpanel">
             <div id="admin-vm-table" class="table-wrap"></div>
+          </div>
+          <div id="admin-vm-tasks-panel" class="subpanel">
+            <div id="admin-vm-task-table" class="table-wrap"></div>
           </div>
           <div id="admin-security-groups-panel" class="subpanel">
             <div id="admin-security-group-table" class="table-wrap"></div>
@@ -600,6 +633,7 @@ const els = {
   templateTable: $('#template-table'),
   userTable: $('#user-table'),
   adminVmTable: $('#admin-vm-table'),
+  adminVMTaskTable: $('#admin-vm-task-table'),
   adminSecurityGroupTable: $('#admin-security-group-table'),
   adminSshKeyTable: $('#admin-ssh-key-table'),
   adminMaintenanceTable: $('#admin-maintenance-table'),
@@ -608,6 +642,7 @@ const els = {
   refreshSshBtn: $('#refresh-ssh-btn'),
   refreshTemplatesBtn: $('#refresh-templates-btn'),
   refreshAdminBtn: $('#refresh-admin-btn'),
+  adminShowCompletedTasks: $('#admin-show-completed-tasks') as HTMLInputElement,
   createVmBtn: $('#create-vm-btn'),
   createSgBtn: $('#create-sg-btn'),
   tabs: Array.from(document.querySelectorAll<HTMLButtonElement>('.tab')),
@@ -1084,7 +1119,7 @@ function applyRoute(pathname: string): boolean {
     return true
   }
 
-  const adminMatch = path.match(/^\/admin(?:\/(users|vms|security-groups|ssh-keys|maintenance))?$/)
+  const adminMatch = path.match(/^\/admin(?:\/(users|vms|vm-tasks|security-groups|ssh-keys|maintenance))?$/)
   if (adminMatch) {
     if (state.me && !state.me.is_admin) {
       state.activeTab = 'vms'
@@ -1144,18 +1179,24 @@ function renderTabs() {
   })
   const adminUsersPanel = document.getElementById('admin-users-panel')
   const adminVmsPanel = document.getElementById('admin-vms-panel')
+  const adminVmTasksPanel = document.getElementById('admin-vm-tasks-panel')
   const adminSecurityGroupsPanel = document.getElementById('admin-security-groups-panel')
   const adminSshKeysPanel = document.getElementById('admin-ssh-keys-panel')
   const adminMaintenancePanel = document.getElementById('admin-maintenance-panel')
   const adminRefreshBtn = document.getElementById('refresh-admin-btn')
   const adminVmsControls = document.getElementById('admin-vms-controls')
+  const adminVmTaskControls = document.getElementById('admin-vm-task-controls')
   adminUsersPanel?.classList.toggle('active', state.adminTab === 'users')
   adminVmsPanel?.classList.toggle('active', state.adminTab === 'vms')
+  adminVmTasksPanel?.classList.toggle('active', state.adminTab === 'vm-tasks')
   adminSecurityGroupsPanel?.classList.toggle('active', state.adminTab === 'security-groups')
   adminSshKeysPanel?.classList.toggle('active', state.adminTab === 'ssh-keys')
   adminMaintenancePanel?.classList.toggle('active', state.adminTab === 'maintenance')
   adminRefreshBtn?.classList.toggle('hidden', state.activeTab !== 'admin')
   adminVmsControls?.classList.toggle('hidden', state.activeTab !== 'admin' || state.adminTab !== 'vms')
+  adminVmTaskControls?.classList.toggle('hidden', state.activeTab !== 'admin' || state.adminTab !== 'vm-tasks')
+  const adminShowCompletedTasks = document.getElementById('admin-show-completed-tasks') as HTMLInputElement | null
+  if (adminShowCompletedTasks) adminShowCompletedTasks.checked = state.adminShowCompletedTasks
 }
 
 function renderVmTable() {
@@ -1680,6 +1721,84 @@ function renderAdminVMs() {
     </table>
   `
   scheduleScrollableTextRefresh(els.adminVmTable)
+}
+
+function adminVMTaskVisible(task: AdminVMTask): boolean {
+  if (state.adminShowCompletedTasks) return true
+  return task.status !== 'done'
+}
+
+function renderAdminVMTasks() {
+  if (!state.me?.is_admin) {
+    els.adminVMTaskTable.innerHTML = `<div class="empty">管理员可见。</div>`
+    return
+  }
+  const visible = state.adminVMTasks.filter((task) => adminVMTaskVisible(task))
+  if (!visible.length) {
+    els.adminVMTaskTable.innerHTML = `<div class="empty">没有 VM 任务。</div>`
+    return
+  }
+  els.adminVMTaskTable.innerHTML = `
+    <table>
+      <colgroup>
+        <col class="col-admin-name" />
+        <col class="col-admin-owner" />
+        <col class="col-admin-cluster" />
+        <col class="col-admin-node" />
+        <col class="col-admin-vmid" />
+        <col class="col-admin-managed" />
+        <col class="col-admin-quota" />
+        <col class="col-admin-metric" />
+        <col class="col-admin-metric" />
+        <col class="col-admin-metric" />
+        <col class="col-admin-metric" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>VM</th>
+          <th>Owner</th>
+          <th>Cluster</th>
+          <th>Node</th>
+          <th>VMID</th>
+          <th>Managed</th>
+          <th>超限</th>
+          <th>Task</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Updated</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${visible
+          .map(
+            (task) => `
+              <tr>
+                <td class="strong">${scrollText(stripVmNamePrefix(task.owner_username, task.vmname), 'strong')}</td>
+                <td>${scrollText(task.owner_username)}</td>
+                <td>${scrollText(displayClusterName(task.cluster_key))}</td>
+                <td>${scrollText(task.node || '-')}</td>
+                <td>${task.vmid}</td>
+                <td>${task.managed ? 'yes' : 'no'}</td>
+                <td>${task.quota_exempt ? 'yes' : 'no'}</td>
+                <td>
+                  <div class="strong">${escapeHtml(taskKindLabel(task.kind))} #${task.seq}</div>
+                  <div class="mono">${escapeHtml(JSON.stringify(task.payload))}</div>
+                  ${task.error ? `<div class="task-error mono">${escapeHtml(task.error)}</div>` : ''}
+                </td>
+                <td>
+                  ${taskStatusBadge(task.status)}
+                  <div class="mono task-state">${escapeHtml(task.sync_state)}</div>
+                </td>
+                <td>${escapeHtml(formatTime(task.created_at))}</td>
+                <td>${escapeHtml(formatTime(task.updated_at))}</td>
+              </tr>
+            `,
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `
+  scheduleScrollableTextRefresh(els.adminVMTaskTable)
 }
 
 function sortVMs(items: VM[], sorts: VMTableSort[]): VM[] {
@@ -2659,6 +2778,14 @@ async function loadAdminMaintenance(force = false) {
   renderAdminMaintenance()
 }
 
+async function loadAdminVMTasks(force = false) {
+  if (!state.me?.is_admin || (state.adminVMTasks.length && !force)) return
+  const includeCompleted = state.adminShowCompletedTasks ? '1' : '0'
+  const data = await api<{ items: AdminVMTask[] }>(`/api/admin/vm-tasks?include_completed=${includeCompleted}`)
+  state.adminVMTasks = data.items
+  renderAdminVMTasks()
+}
+
 async function refreshVMViews() {
   await loadVMs()
   renderSummary()
@@ -2698,6 +2825,8 @@ async function loadActiveTab() {
         await loadAdminUsers(true)
       } else if (state.adminTab === 'vms') {
         await loadAdminVMs(true)
+      } else if (state.adminTab === 'vm-tasks') {
+        await loadAdminVMTasks(true)
       } else if (state.adminTab === 'security-groups') {
         await loadAdminSecurityGroups(true)
       } else if (state.adminTab === 'maintenance') {
@@ -3074,6 +3203,17 @@ function bindEvents() {
   els.guideBtn.addEventListener('click', () => {
     window.open('https://outline.netunion.org/s/49a532e9-d41f-4b10-b9a3-11ee71ddb9b1', '_blank', 'noopener,noreferrer')
   })
+  els.adminShowCompletedTasks.addEventListener('change', async () => {
+    try {
+      state.adminShowCompletedTasks = els.adminShowCompletedTasks.checked
+      state.adminVMTasks = []
+      if (state.activeTab === 'admin' && state.adminTab === 'vm-tasks') {
+        await loadAdminVMTasks(true)
+      }
+    } catch (err) {
+      flash((err as Error).message, 'error')
+    }
+  })
   els.tabs.forEach((tab) => {
     tab.addEventListener('click', async () => {
       try {
@@ -3088,7 +3228,10 @@ function bindEvents() {
     button.addEventListener('click', async () => {
       const tab = button.dataset.adminTab
       try {
-        const nextAdminTab = tab === 'vms' || tab === 'security-groups' || tab === 'ssh-keys' || tab === 'maintenance' ? tab : 'users'
+        const nextAdminTab =
+          tab === 'vms' || tab === 'vm-tasks' || tab === 'security-groups' || tab === 'ssh-keys' || tab === 'maintenance'
+            ? tab
+            : 'users'
         await navigateTo(routeForTab('admin', nextAdminTab))
       } catch (err) {
         flash((err as Error).message, 'error')
@@ -3245,6 +3388,8 @@ function bindEvents() {
           state.users = []
         } else if (state.adminTab === 'vms') {
           state.allVMs = []
+        } else if (state.adminTab === 'vm-tasks') {
+          state.adminVMTasks = []
         } else if (state.adminTab === 'security-groups') {
           state.adminSecurityGroups = []
         } else if (state.adminTab === 'ssh-keys') {
