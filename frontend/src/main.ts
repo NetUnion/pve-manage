@@ -451,10 +451,10 @@ app.innerHTML = `
           <label id="vm-template-row">Template<select id="vm-template" class="input"></select></label>
           <label>名称<input id="vm-name" class="input" /></label>
           <label id="vm-ip-row" class="hidden">IP/CIDR<input id="vm-ip" class="input" placeholder="10.10.80.11/18" /></label>
-          <label>CPU Key<select id="vm-cpu-key" class="input"></select></label>
+          <label>CPU Type<select id="vm-cpu-key" class="input"></select></label>
           <label>CPU 核数<input id="vm-cpu-cores" class="input" type="number" min="1" /></label>
           <label>Memory GB<input id="vm-memory-gb" class="input" type="number" min="1" /></label>
-          <label>Storage Key<select id="vm-storage-key" class="input"></select></label>
+          <label>Storage Type<select id="vm-storage-key" class="input"></select></label>
           <label>Disk GB<input id="vm-disk-gb" class="input" type="number" min="20" /></label>
           <label>Boot Order<select id="vm-boot-order" class="input">
             <option value="order=scsi0;ide0">disk first</option>
@@ -466,7 +466,7 @@ app.innerHTML = `
         <div class="wizard-step-title">3. 网络 / 安全组</div>
         <div id="vm-network-help" class="wizard-step-help"></div>
         <div class="form-grid compact">
-          <label>Bridge<select id="vm-bridge-key" class="input"></select></label>
+          <label>Network<select id="vm-bridge-key" class="input"></select></label>
           <label>Security Group<select id="vm-sg" class="input"></select></label>
           <label class="checkbox-row"><input id="vm-uestc" type="checkbox" /> UESTC内网访问限制(建议开启)</label>
         </div>
@@ -843,6 +843,12 @@ function getCluster(key?: string): ClusterOption | undefined {
 
 function displayClusterName(key?: string): string {
   return getCluster(key)?.name || key || '-'
+}
+
+function displayStorageType(clusterKey?: string, StorageKey?: string): string {
+  const cluster = getCluster(clusterKey)
+  const storage = cluster?.storage.find((item) => item.key === StorageKey)
+  return storage?.name || StorageKey || '-'
 }
 
 function displayCPUName(clusterKey?: string, cpuKey?: string): string {
@@ -1399,7 +1405,7 @@ function renderVmWizardProgress() {
     },
     {
       title: '3. 网络',
-      detail: cluster ? 'Bridge / Security Group' : '等待前一步',
+      detail: cluster ? 'Network / Security Group' : '等待前一步',
     },
     {
       title: '4. 访问',
@@ -1454,7 +1460,7 @@ function renderVmWizardHelp() {
   `
   els.vmNetworkHelp.innerHTML = `
     <div class="wizard-step-summary">
-      <span>Bridge ${escapeHtml(bridge?.key || '-')}</span>
+      <span>Network ${escapeHtml(bridge?.key || '-')}</span>
       <span>UESTC ${escapeHtml(bridge ? bridge.uestc : '-')}</span>
       <span>IPv4 ${escapeHtml(bridge ? `${bridge.ipv4.start_ip}/${bridge.ipv4.cidr}` : '-')}</span>
     </div>
@@ -2132,7 +2138,7 @@ function advanceVmWizard(stepDelta: 1 | -1) {
       return
     }
     if (state.vmWizardStage === 3) {
-      flash('请先选择 Bridge 和 Security Group。', 'error')
+      flash('请先选择 Network 和 Security Group。', 'error')
       focusVmField('bridge')
       return
     }
@@ -2301,15 +2307,15 @@ function renderDetail(vm: VM) {
       <div><span class="label">CPU Type</span><div>${scrollText(displayCPUName(vm.cluster_key, cpuKey))}</div></div>
       <div><span class="label">CPU Cores</span><div>${cpuCores || '-'}</div></div>
       <div><span class="label">Memory</span><div>${memoryGB ? `${memoryGB} GB` : '-'}</div></div>
-      <div><span class="label">Storage</span><div>${scrollText(storageKey)}</div></div>
+      <div><span class="label">Storage Type</span><div>${scrollText(displayStorageType(vm.cluster_key, storageKey))}</div></div>
       <div><span class="label">Disk</span><div>${diskGB ? `${diskGB} GB` : '-'}</div></div>
-      <div><span class="label">Bridge</span><div>${scrollText(bridgeKey)}</div></div>
+      <div><span class="label">Network</span><div>${scrollText(bridgeKey)}</div></div>
       <div><span class="label">Boot Order</span><div>${scrollText(bootOrder)}</div></div>
       <div><span class="label">Security Group</span><div>${scrollText(vm.security_group_name)}</div></div>
       <div><span class="label">SSH Keys</span><div>${scrollText(vm.sshkeys.length ? `${vm.sshkeys.length} item(s)` : '-', 'mono')}</div></div>
       <div><span class="label">Shared Users</span><div>${scrollText(vm.shared_usernames.length ? vm.shared_usernames.join(', ') : '-', 'mono')}</div></div>
       <div><span class="label">UESTC内网访问限制</span><div>${vm.uestc_restricted ? 'on' : 'off'}</div></div>
-      <div><span class="label">超限</span><div>${vm.quota_exempt ? 'yes' : 'no'}</div></div>
+      <div><span class="label">超出资源限制</span><div>${vm.quota_exempt ? 'yes' : 'no'}</div></div>
       <div><span class="label">Sync State</span><div>${statusBadge(vm.sync_state)}</div></div>
       <div><span class="label">Power</span><div>${escapeHtml(realPowerFrom(vm))}</div></div>
       <div><span class="label">任务队列</span><div>${vm.task_queue_paused ? '<span class="badge warn">已暂停</span>' : '<span class="badge ok">运行中</span>'}</div></div>
