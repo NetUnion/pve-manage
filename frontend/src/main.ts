@@ -2111,10 +2111,10 @@ function renderVmFormOptions() {
 
   const network = cluster.network[0]
   if (network) {
-    if (state.vmDialogMode === 'create' && !state.vmDialogVm) {
-      els.vmUESTC.checked = network.uestc === 'force'
-    }
     els.vmUESTC.disabled = network.uestc === 'force'
+    if (network.uestc === 'force') {
+      els.vmUESTC.checked = true
+    }
   }
   els.vmOwnerRow.classList.toggle('hidden', !(isAdopt || adminEdit))
   els.vmIpRow.classList.toggle('hidden', !isAdopt)

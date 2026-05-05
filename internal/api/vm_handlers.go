@@ -400,7 +400,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chooseUESTC := false
+	chooseUESTC := true
 	if req.UESTCRestricted != nil {
 		chooseUESTC = *req.UESTCRestricted
 	}
