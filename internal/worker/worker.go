@@ -327,11 +327,22 @@ func (w *Worker) purgeOldMaintenanceTasks(ctx context.Context) error {
 
 func (w *Worker) purgeOldTasks(ctx context.Context) error {
 	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
-	_, err := w.db.ExecContext(ctx, `
+	if _, err := w.db.ExecContext(ctx, `
 		DELETE FROM vm_tasks
 		WHERE status IN ('done', 'failed', 'canceled')
 		  AND finished_at IS NOT NULL
 		  AND finished_at < ?
+	`, cutoff); err != nil {
+		return err
+	}
+	_, err := w.db.ExecContext(ctx, `
+		DELETE FROM vm_tasks
+		WHERE vm_id IN (
+			SELECT id
+			FROM vms
+			WHERE deleted_at IS NOT NULL
+			  AND deleted_at < ?
+		)
 	`, cutoff)
 	return err
 }
@@ -1152,7 +1163,13 @@ func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any
 	if err := w.pve.DeleteVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
 		return err
 	}
-	return w.markDeleted(ctx, vm.ID)
+	if err := w.markDeleted(ctx, vm.ID); err != nil {
+		return err
+	}
+	if err := w.cancelOutstandingVMTasks(ctx, vm.ID); err != nil {
+		w.logger.WarnContext(ctx, "cancel outstanding vm tasks failed after delete", "id", vm.ID, "error", err)
+	}
+	return nil
 }
 
 func (w *Worker) cleanupDeletionArtifacts(ctx context.Context, vm vmRow, node string) error {
@@ -1615,6 +1632,17 @@ func (w *Worker) markDeleted(ctx context.Context, id int64) error {
 		SET deleted_at = ?, real_status_json = ?, sync_state = 'synced', sync_error = NULL, updated_at = ?
 		WHERE id = ?
 	`, now, string(real), now, id)
+	return err
+}
+
+func (w *Worker) cancelOutstandingVMTasks(ctx context.Context, vmID int64) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'canceled', updated_at = ?
+		WHERE vm_id = ?
+		  AND status NOT IN ('done', 'canceled')
+	`, now, vmID)
 	return err
 }
 
