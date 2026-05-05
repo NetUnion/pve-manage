@@ -1128,7 +1128,7 @@ func (s *Server) loadSSHKeysByIDs(ctx context.Context, ownerUsername string, ids
 		if err != nil {
 			return nil, err
 		}
-		keys = append(keys, item.PublicKey)
+		keys = append(keys, annotateSSHKeyLine(item.PublicKey, item.Name, item.OwnerUsername))
 	}
 	return normalizeSSHKeyList(keys)
 }
@@ -1151,9 +1151,27 @@ func (s *Server) loadSSHKeysByIDsAny(ctx context.Context, ids []int64) ([]string
 		if err != nil {
 			return nil, err
 		}
-		keys = append(keys, item.PublicKey)
+		keys = append(keys, annotateSSHKeyLine(item.PublicKey, item.Name, item.OwnerUsername))
 	}
 	return normalizeSSHKeyList(keys)
+}
+
+func annotateSSHKeyLine(publicKey, name, ownerUsername string) string {
+	publicKey = strings.TrimSpace(strings.ReplaceAll(publicKey, "\r", ""))
+	if publicKey == "" {
+		return ""
+	}
+	label := strings.TrimSpace(name)
+	if ownerUsername != "" {
+		if label != "" {
+			label += "@"
+		}
+		label += ownerUsername
+	}
+	if label == "" {
+		return publicKey
+	}
+	return publicKey + " " + label
 }
 
 func (s *Server) loadSSHKeyRowAny(ctx context.Context, id int64) (*sshKeySummary, error) {
