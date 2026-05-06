@@ -538,6 +538,11 @@ app.innerHTML = `
       </div>
       <input type="hidden" id="ssh-id" />
       <label>Name<input id="ssh-name" class="input" /></label>
+      <div id="ssh-pub-drop" class="file-drop" role="button" tabindex="0">
+        <input id="ssh-pub-file" type="file" accept=".pub" hidden />
+        <div class="file-drop-title">拖入 .pub 公钥文件</div>
+        <div id="ssh-pub-help" class="file-drop-help">仅识别 .pub 文件，也可以点击选择。</div>
+      </div>
       <label>Public Key<textarea id="ssh-key" class="input textarea" placeholder="ssh-ed25519 AAAA..."></textarea></label>
       <div class="dialog-actions">
         <button type="button" class="btn btn-ghost" data-close-dialog="ssh-dialog">取消</button>
@@ -672,6 +677,9 @@ const els = {
   sshId: $('#ssh-id') as HTMLInputElement,
   sshName: $('#ssh-name') as HTMLInputElement,
   sshKey: $('#ssh-key') as HTMLTextAreaElement,
+  sshPubDrop: $('#ssh-pub-drop'),
+  sshPubFile: $('#ssh-pub-file') as HTMLInputElement,
+  sshPubHelp: $('#ssh-pub-help'),
   vmId: $('#vm-id') as HTMLInputElement,
   vmClusterHelp: $('#vm-cluster-help'),
   vmNetworkHelp: $('#vm-network-help'),
@@ -2373,6 +2381,8 @@ function resetSSHDialog() {
   els.sshId.value = ''
   els.sshName.value = ''
   els.sshKey.value = ''
+  els.sshPubFile.value = ''
+  setSSHPubDropHelp('仅识别 .pub 文件，也可以点击选择。')
 }
 
 function fillSSHDialog(key: SSHKey) {
@@ -2382,6 +2392,8 @@ function fillSSHDialog(key: SSHKey) {
   els.sshId.value = String(key.id)
   els.sshName.value = key.name
   els.sshKey.value = key.public_key
+  els.sshPubFile.value = ''
+  setSSHPubDropHelp('编辑时可拖入新的 .pub 文件辅助复制。')
 }
 
 function openSSHDialog(mode: 'create' | 'edit', key?: SSHKey) {
@@ -2391,6 +2403,31 @@ function openSSHDialog(mode: 'create' | 'edit', key?: SSHKey) {
     fillSSHDialog(key)
   }
   showDialog(els.sshDialog)
+}
+
+function setSSHPubDropHelp(message: string, kind: 'info' | 'error' | 'ok' = 'info') {
+  els.sshPubHelp.textContent = message
+  els.sshPubDrop.classList.toggle('error', kind === 'error')
+  els.sshPubDrop.classList.toggle('ok', kind === 'ok')
+}
+
+async function fillSSHKeyFromPubFile(file?: File | null) {
+  if (!file) return
+  if (!file.name.toLowerCase().endsWith('.pub')) {
+    setSSHPubDropHelp('只支持 .pub 文件。', 'error')
+    flash('只支持 .pub 文件。', 'error')
+    return
+  }
+  const content = (await file.text()).trim()
+  if (!content) {
+    setSSHPubDropHelp('文件为空，未填充。', 'error')
+    return
+  }
+  els.sshKey.value = content
+  if (!els.sshName.value.trim()) {
+    els.sshName.value = file.name.replace(/\.pub$/i, '')
+  }
+  setSSHPubDropHelp(`已读取 ${file.name}`, 'ok')
 }
 
 function renderDetail(vm: VM) {
@@ -3309,6 +3346,31 @@ function bindEvents() {
   els.ipForm.addEventListener('submit', submitIpForm)
   els.quotaForm.addEventListener('submit', submitQuotaForm)
   els.addRuleBtn.addEventListener('click', () => addRuleRow())
+  els.sshPubDrop.addEventListener('click', () => els.sshPubFile.click())
+  els.sshPubDrop.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      els.sshPubFile.click()
+    }
+  })
+  els.sshPubFile.addEventListener('change', () => {
+    void fillSSHKeyFromPubFile(els.sshPubFile.files?.[0])
+  })
+  ;['dragenter', 'dragover'].forEach((eventName) => {
+    els.sshPubDrop.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      els.sshPubDrop.classList.add('dragging')
+    })
+  })
+  ;['dragleave', 'drop'].forEach((eventName) => {
+    els.sshPubDrop.addEventListener(eventName, (event) => {
+      event.preventDefault()
+      els.sshPubDrop.classList.remove('dragging')
+    })
+  })
+  els.sshPubDrop.addEventListener('drop', (event) => {
+    void fillSSHKeyFromPubFile(event.dataTransfer?.files?.[0])
+  })
   document.body.addEventListener('click', async (event) => {
     const target = event.target as HTMLElement
     if (target.closest('[data-detail-back]')) {
