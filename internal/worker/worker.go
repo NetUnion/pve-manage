@@ -190,6 +190,10 @@ func (w *Worker) syncOnce(ctx context.Context) error {
 		}
 	}
 
+	if err := w.ensureExpiredDeleteTasks(ctx); err != nil {
+		return err
+	}
+
 	tasks, err := w.pendingTasks(ctx)
 	if err != nil {
 		return err
@@ -416,6 +420,79 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 		items = append(items, current)
 	}
 	return items, rows.Err()
+}
+
+func (w *Worker) ensureExpiredDeleteTasks(ctx context.Context) error {
+	now := timestamp()
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT id
+		FROM vms v
+		WHERE v.deleted_at IS NULL
+		  AND v.managed = 1
+		  AND v.task_queue_paused = 0
+		  AND v.delete_requested_at IS NOT NULL
+		  AND v.delete_execute_after IS NOT NULL
+		  AND v.delete_execute_after <= ?
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM vm_tasks vt
+		      WHERE vt.vm_id = v.id
+		        AND vt.kind = 'delete'
+		        AND vt.status IN ('pending', 'running', 'failed')
+		  )
+	`, now)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := w.queueVMTask(ctx, id, "delete", map[string]any{"vm_id": id, "expired": true}); err != nil {
+			return err
+		}
+		w.logger.InfoContext(ctx, "queued expired vm delete", "vm_id", id)
+	}
+	return nil
+}
+
+func (w *Worker) queueVMTask(ctx context.Context, vmID int64, kind string, payload any) error {
+	tx, err := w.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var nextSeq int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(seq), 0) + 1
+		FROM vm_tasks
+		WHERE vm_id = ?
+	`, vmID).Scan(&nextSeq); err != nil {
+		return err
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	now := timestamp()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
+		VALUES(?,?,?,?, 'pending', ?, ?)
+	`, vmID, nextSeq, kind, string(payloadJSON), now, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (w *Worker) runTask(ctx context.Context, task vmTaskRow) error {
@@ -1176,7 +1253,7 @@ func (w *Worker) cleanupDeletionArtifacts(ctx context.Context, vm vmRow, node st
 	if err := w.removeSnapshots(ctx, vm, node); err != nil {
 		return err
 	}
-	if err := w.removeBackups(ctx, vm); err != nil {
+	if err := w.removeBackups(ctx, vm, node); err != nil {
 		return err
 	}
 	return nil
@@ -1198,25 +1275,25 @@ func (w *Worker) removeSnapshots(ctx context.Context, vm vmRow, node string) err
 	return nil
 }
 
-func (w *Worker) removeBackups(ctx context.Context, vm vmRow) error {
-	cluster, ok := w.config.Root.Cluster[vm.ClusterKey]
-	if !ok {
-		return fmt.Errorf("unknown cluster %s", vm.ClusterKey)
+func (w *Worker) removeBackups(ctx context.Context, vm vmRow, node string) error {
+	storages, err := w.pve.ListBackupStorages(ctx, vm.ClusterKey, node)
+	if err != nil {
+		return err
 	}
-	for storageKey := range cluster.Storage {
-		items, err := w.pve.ListStorageContent(ctx, vm.ClusterKey, storageKey, vm.VMID, "backup")
+	for _, storage := range storages {
+		items, err := w.pve.ListStorageContent(ctx, vm.ClusterKey, node, storage.Name, vm.VMID, "backup")
 		if err != nil {
 			if isIgnorableBackupScanError(err) {
 				continue
 			}
-			return fmt.Errorf("storage %s: %w", storageKey, err)
+			return fmt.Errorf("storage %s: %w", storage.Name, err)
 		}
 		for _, item := range items {
 			if item.VMID != vm.VMID || item.VolID == "" {
 				continue
 			}
-			if err := w.pve.DeleteStorageContent(ctx, vm.ClusterKey, storageKey, item.VolID); err != nil {
-				return fmt.Errorf("delete backup %s/%s: %w", storageKey, item.VolID, err)
+			if err := w.pve.DeleteStorageContent(ctx, vm.ClusterKey, node, storage.Name, item.VolID); err != nil {
+				return fmt.Errorf("delete backup %s/%s: %w", storage.Name, item.VolID, err)
 			}
 		}
 	}

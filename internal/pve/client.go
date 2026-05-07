@@ -62,6 +62,13 @@ type StorageContent struct {
 	Format string `json:"format"`
 }
 
+type Storage struct {
+	Name    string
+	Content string
+	Nodes   string
+	Shared  int
+}
+
 type NodeStatus struct {
 	Status string  `json:"status"`
 	CPU    float64 `json:"cpu"`
@@ -255,7 +262,26 @@ func (c *Client) DeleteVMSnapshot(ctx context.Context, clusterKey, node string, 
 	return waitProxmoxTask(ctx, proxmox.NewTask(upid, client), 30*time.Minute)
 }
 
-func (c *Client) ListStorageContent(ctx context.Context, clusterKey, storage string, vmid int, content string) ([]StorageContent, error) {
+func (c *Client) ListBackupStorages(ctx context.Context, clusterKey, node string) ([]Storage, error) {
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return nil, err
+	}
+	items, err := client.ClusterStorages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	storages := make([]Storage, 0, len(items))
+	for _, item := range items {
+		if !storageSupportsContent(item.Content, "backup") || !storageAvailableOnNode(item.Nodes, node, item.Shared != 0) {
+			continue
+		}
+		storages = append(storages, Storage{Name: item.Storage, Content: item.Content, Nodes: item.Nodes, Shared: item.Shared})
+	}
+	return storages, nil
+}
+
+func (c *Client) ListStorageContent(ctx context.Context, clusterKey, node, storage string, vmid int, content string) ([]StorageContent, error) {
 	values := url.Values{}
 	if vmid > 0 {
 		values.Set("vmid", strconv.Itoa(vmid))
@@ -264,23 +290,28 @@ func (c *Client) ListStorageContent(ctx context.Context, clusterKey, storage str
 		values.Set("content", content)
 	}
 	var items []StorageContent
-	if err := c.request(ctx, clusterKey, http.MethodGet, "/storage/"+url.PathEscape(storage)+"/content", values, &items); err != nil {
+	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/storage/%s/content", url.PathEscape(node), url.PathEscape(storage)), values, &items); err != nil {
 		return nil, err
 	}
 	return items, nil
 }
 
-func (c *Client) DeleteStorageContent(ctx context.Context, clusterKey, storage, volid string) error {
+func (c *Client) DeleteStorageContent(ctx context.Context, clusterKey, node, storage, volid string) error {
 	if volid == "" {
 		return nil
 	}
-	if err := c.request(ctx, clusterKey, http.MethodDelete, "/storage/"+url.PathEscape(storage)+"/content/"+url.PathEscape(volid), nil, nil); err != nil {
+	var upid proxmox.UPID
+	if err := c.request(ctx, clusterKey, http.MethodDelete, fmt.Sprintf("/nodes/%s/storage/%s/content/%s", url.PathEscape(node), url.PathEscape(storage), url.PathEscape(volid)), nil, &upid); err != nil {
 		if isNotFoundErr(err) {
 			return nil
 		}
 		return err
 	}
-	return nil
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, proxmox.NewTask(upid, client), 30*time.Minute)
 }
 
 func (c *Client) FindVMNode(ctx context.Context, clusterKey string, vmid int) (string, bool, error) {
@@ -579,6 +610,27 @@ func valuesToMap(values url.Values) map[string]string {
 		out[key] = strings.Join(items, ",")
 	}
 	return out
+}
+
+func storageSupportsContent(contents string, target string) bool {
+	for _, item := range strings.Split(contents, ",") {
+		if strings.EqualFold(strings.TrimSpace(item), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func storageAvailableOnNode(nodes string, node string, shared bool) bool {
+	if shared || strings.TrimSpace(nodes) == "" || node == "" {
+		return true
+	}
+	for _, item := range strings.Split(nodes, ",") {
+		if strings.TrimSpace(item) == node {
+			return true
+		}
+	}
+	return false
 }
 
 func waitProxmoxTask(ctx context.Context, task *proxmox.Task, timeout time.Duration) error {
