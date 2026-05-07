@@ -140,6 +140,11 @@ type VMMetricPoint = {
   network: number
 }
 
+type VMMetricChartSeries = {
+  points: VMMetricPoint[]
+  rangeStart?: string
+}
+
 type VMTask = {
   id: number
   vm_id: number
@@ -764,6 +769,27 @@ function formatRate(value?: number): string {
 function latestMetric(points?: VMMetricPoint[]): VMMetricPoint | null {
   if (!points?.length) return null
   return points[points.length - 1]
+}
+
+function vmMetricChartSeries(vm: VM): VMMetricChartSeries {
+  const points = vm.metrics_history ?? []
+  const createdAt = new Date(vm.created_at)
+  const now = new Date()
+  if (!Number.isFinite(createdAt.getTime())) {
+    return { points }
+  }
+  const oneMonthAgo = new Date(now)
+  oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
+  if (createdAt <= oneMonthAgo) {
+    return { points }
+  }
+  return {
+    points: points.filter((point) => {
+      const pointTime = new Date(point.time)
+      return Number.isFinite(pointTime.getTime()) && pointTime >= createdAt
+    }),
+    rangeStart: vm.created_at,
+  }
 }
 
 function scrollText(value: string, className = ''): string {
@@ -2423,7 +2449,8 @@ async function fillSSHKeyFromPubFile(file?: File | null) {
 
 function renderDetail(vm: VM) {
   state.detailVM = vm
-  const metrics = vm.metrics_history ?? []
+  const metricSeries = vmMetricChartSeries(vm)
+  const metrics = metricSeries.points
   const latest = latestMetric(metrics)
   const deleteInfo = isDeletePending(vm)
     ? `<div><span class="label">删除时间</span><div>${escapeHtml(formatTime(vm.delete_execute_after))}</div></div>`
@@ -2503,7 +2530,7 @@ function renderDetail(vm: VM) {
               <div class="metric-card"><span class="label">Network</span><strong>${formatRate(latest.network)}</strong></div>
             </div>
             <div class="metric-note">最新采样时间：${escapeHtml(formatTime(latest.time))}，共 ${metrics.length} 个采样点。</div>
-            ${renderMetricCharts(metrics)}`
+            ${renderMetricCharts(metricSeries)}`
           : `<div class="empty compact">暂无指标数据，等待下一次 inventory scan 采集。</div>`
       }
     </div>
@@ -2555,19 +2582,19 @@ function renderDetail(vm: VM) {
   scheduleScrollableTextRefresh(els.detailPageContent)
 }
 
-function renderMetricCharts(points: VMMetricPoint[]): string {
-  const series = points
+function renderMetricCharts(series: VMMetricChartSeries): string {
+  const { points, rangeStart } = series
   return `
     <div class="metric-chart-grid">
-      ${renderMetricChart(series, 'cpu', 'CPU MAX', formatPercent, '#2563eb')}
-      ${renderMetricChart(series, 'memory', 'Memory MAX', formatPercent, '#7c3aed')}
-      ${renderDiskIOChart(series)}
-      ${renderMetricChart(series, 'network', 'Network MAX', formatRate, '#d97706')}
+      ${renderMetricChart(points, 'cpu', 'CPU MAX', formatPercent, '#2563eb', rangeStart)}
+      ${renderMetricChart(points, 'memory', 'Memory MAX', formatPercent, '#7c3aed', rangeStart)}
+      ${renderDiskIOChart(points, rangeStart)}
+      ${renderMetricChart(points, 'network', 'Network MAX', formatRate, '#d97706', rangeStart)}
     </div>
   `
 }
 
-function renderDiskIOChart(points: VMMetricPoint[]): string {
+function renderDiskIOChart(points: VMMetricPoint[], rangeStart?: string): string {
   const chartLeft = 96
   const chartRight = 620
   const chartTop = 32
@@ -2587,7 +2614,7 @@ function renderDiskIOChart(points: VMMetricPoint[]): string {
   const writeArea = writePath ? `${writePath} L ${chartRight} ${chartBottom} L ${chartLeft} ${chartBottom} Z` : ''
   const readPoint = readValues.length ? chartPoint(readValues.length - 1, latestRead, readValues.length, 0, maxValue) : null
   const writePoint = writeValues.length ? chartPoint(writeValues.length - 1, latestWrite, writeValues.length, 0, maxValue) : null
-  const firstTime = points[0]?.time ? formatTime(points[0].time) : '-'
+  const firstTime = rangeStart ? formatTime(rangeStart) : points[0]?.time ? formatTime(points[0].time) : '-'
   const lastTime = points[points.length - 1]?.time ? formatTime(points[points.length - 1].time) : '-'
   const midValue = maxValue / 2
 
@@ -2644,6 +2671,7 @@ function renderMetricChart(
   title: string,
   formatter: (value?: number) => string,
   color: string,
+  rangeStart?: string,
 ): string {
   const chartLeft = 96
   const chartRight = 620
@@ -2659,7 +2687,7 @@ function renderMetricChart(
   const path = chartPath(values, minValue, maxValue)
   const area = path ? `${path} L ${chartRight} ${chartBottom} L ${chartLeft} ${chartBottom} Z` : ''
   const lastPoint = values.length ? chartPoint(values.length - 1, values[values.length - 1] ?? 0, values.length, minValue, maxValue) : null
-  const firstTime = points[0]?.time ? formatTime(points[0].time) : '-'
+  const firstTime = rangeStart ? formatTime(rangeStart) : points[0]?.time ? formatTime(points[0].time) : '-'
   const lastTime = points[points.length - 1]?.time ? formatTime(points[points.length - 1].time) : '-'
   const gradientId = `metric-gradient-${key}`
   const midValue = (maxValue + minValue) / 2
