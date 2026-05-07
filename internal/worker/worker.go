@@ -509,11 +509,15 @@ func (w *Worker) runTask(ctx context.Context, task vmTaskRow) error {
 	case "reboot":
 		err = w.runRebootTask(ctx, task.VM)
 	case "delete":
+		var payload map[string]any
+		if e := json.Unmarshal([]byte(task.PayloadJSON), &payload); e != nil {
+			return fmt.Errorf("invalid delete task payload: %w", e)
+		}
 		var prefer map[string]any
 		if e := json.Unmarshal([]byte(task.VM.PreferStatusJSON), &prefer); e != nil {
 			return fmt.Errorf("invalid prefer_status_json: %w", e)
 		}
-		err = w.syncDelete(ctx, task.VM, prefer)
+		err = w.syncDelete(ctx, task.VM, prefer, payload)
 	default:
 		return fmt.Errorf("unknown task kind %q", task.Kind)
 	}
@@ -690,7 +694,7 @@ func (w *Worker) syncVM(ctx context.Context, vm vmRow) error {
 
 	intent, _ := prefer["intent"].(string)
 	if intent == "delete_pending" || vm.SyncState == "deleting" {
-		return w.syncDelete(ctx, vm, prefer)
+		return w.syncDelete(ctx, vm, prefer, nil)
 	}
 	return w.syncPresent(ctx, vm, prefer)
 }
@@ -1198,7 +1202,7 @@ func isPowerTimeoutError(err error) bool {
 	return strings.Contains(msg, "got timeout") || strings.Contains(msg, "timed out") || strings.Contains(msg, "timeout")
 }
 
-func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any) error {
+func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any, payload map[string]any) error {
 	node, exists, err := w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID)
 	if err != nil {
 		return err
@@ -1216,10 +1220,7 @@ func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any
 			w.logger.WarnContext(ctx, "shutdown before delete failed", "id", vm.ID, "error", err)
 		}
 	}
-	execAt := vm.DeleteExecuteAfter.String
-	if execAt == "" {
-		execAt, _ = prefer["delete_execute_after"].(string)
-	}
+	execAt := deleteExecuteAfterForTask(vm, prefer, payload)
 	deleteAt, err := parseTime(execAt)
 	if err != nil {
 		return fmt.Errorf("invalid delete_execute_after: %w", err)
@@ -1247,6 +1248,35 @@ func (w *Worker) syncDelete(ctx context.Context, vm vmRow, prefer map[string]any
 		w.logger.WarnContext(ctx, "cancel outstanding vm tasks failed after delete", "id", vm.ID, "error", err)
 	}
 	return nil
+}
+
+func deleteExecuteAfterForTask(vm vmRow, prefer map[string]any, payload map[string]any) string {
+	if payload != nil && !boolFromMapAny(payload, "immediate") && !boolFromMapAny(payload, "expired") {
+		if execAt, _ := payload["execute_after"].(string); execAt != "" {
+			return execAt
+		}
+	}
+	if vm.DeleteExecuteAfter.Valid && vm.DeleteExecuteAfter.String != "" {
+		return vm.DeleteExecuteAfter.String
+	}
+	execAt, _ := prefer["delete_execute_after"].(string)
+	return execAt
+}
+
+func boolFromMapAny(obj map[string]any, key string) bool {
+	if obj == nil {
+		return false
+	}
+	switch v := obj[key].(type) {
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		return v == "1" || strings.EqualFold(v, "true") || strings.EqualFold(v, "yes")
+	default:
+		return false
+	}
 }
 
 func (w *Worker) cleanupDeletionArtifacts(ctx context.Context, vm vmRow, node string) error {
