@@ -298,6 +298,7 @@ app.innerHTML = `
     </div>
     <div class="topbar-actions">
       <div id="me-chip" class="me-chip">未登录</div>
+      <button id="theme-toggle-btn" class="theme-toggle" type="button" aria-label="切换到夜间模式" aria-pressed="false">☾</button>
       <button id="login-btn" class="btn btn-primary">登录</button>
       <button id="logout-btn" class="btn btn-ghost">退出</button>
     </div>
@@ -636,6 +637,7 @@ const els = {
   toastText: $('#toast-text'),
   toastClose: $('#toast-close') as HTMLButtonElement,
   loadingIndicator: $('#loading-indicator') as HTMLDivElement,
+  themeToggleBtn: $('#theme-toggle-btn') as HTMLButtonElement,
   loginBtn: $('#login-btn'),
   logoutBtn: $('#logout-btn'),
   guideBtn: $('#guide-btn'),
@@ -790,6 +792,29 @@ function vmMetricChartSeries(vm: VM): VMMetricChartSeries {
     }),
     rangeStart: vm.created_at,
   }
+}
+
+function currentTheme(): 'light' | 'dark' {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
+}
+
+function applyTheme(theme: 'light' | 'dark') {
+  document.documentElement.dataset.theme = theme
+  els.themeToggleBtn.textContent = theme === 'dark' ? '☀' : '☾'
+  els.themeToggleBtn.title = theme === 'dark' ? '切换到日间模式' : '切换到夜间模式'
+  els.themeToggleBtn.setAttribute('aria-label', theme === 'dark' ? '切换到日间模式' : '切换到夜间模式')
+  els.themeToggleBtn.setAttribute('aria-pressed', String(theme === 'dark'))
+}
+
+function loadTheme() {
+  const saved = localStorage.getItem('cloud-manage-theme')
+  applyTheme(saved === 'dark' ? 'dark' : 'light')
+}
+
+function toggleTheme() {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark'
+  localStorage.setItem('cloud-manage-theme', next)
+  applyTheme(next)
 }
 
 function scrollText(value: string, className = ''): string {
@@ -3247,6 +3272,7 @@ function backToVMList() {
 }
 
 function bindEvents() {
+  els.themeToggleBtn.addEventListener('click', toggleTheme)
   els.loginBtn.addEventListener('click', () => {
     window.location.href = '/auth/login'
   })
@@ -3630,6 +3656,7 @@ function bindEvents() {
 }
 
 async function init() {
+  loadTheme()
   bindEvents()
   try {
     await loadMe()
