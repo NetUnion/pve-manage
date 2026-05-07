@@ -35,6 +35,7 @@ type Cluster struct {
 	CPU       map[string]CPUClass     `yaml:"cpu"`
 	Storage   map[string]StorageClass `yaml:"storage"`
 	Network   NetworkConfig           `yaml:"network"`
+	TPM       string                  `yaml:"tpm"`
 }
 
 type CPUClass struct {

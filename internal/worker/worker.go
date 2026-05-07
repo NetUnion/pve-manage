@@ -875,6 +875,9 @@ func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]an
 	if err := w.moveDiskIfNeeded(ctx, vm, prefer, cfg, node); err != nil {
 		return err
 	}
+	if err := w.moveTPMIfNeeded(ctx, vm, cluster, cfg, node); err != nil {
+		return err
+	}
 	if err := w.resizeDisk(ctx, vm, prefer, cfg, node); err != nil {
 		return err
 	}
@@ -966,6 +969,22 @@ func (w *Worker) moveDiskIfNeeded(ctx context.Context, vm vmRow, prefer map[stri
 		return nil
 	}
 	return w.pve.MoveDisk(ctx, vm.ClusterKey, node, vm.VMID, diskKey, desiredStorage)
+}
+
+func (w *Worker) moveTPMIfNeeded(ctx context.Context, vm vmRow, cluster config.Cluster, cfg map[string]any, node string) error {
+	desiredStorage := strings.TrimSpace(cluster.TPM)
+	if desiredStorage == "" {
+		return nil
+	}
+	raw := stringFromMap(cfg, "tpmstate0", "")
+	if raw == "" {
+		return nil
+	}
+	currentStorage := storageKeyFromDisk(raw)
+	if currentStorage == "" || currentStorage == desiredStorage {
+		return nil
+	}
+	return w.pve.MoveDisk(ctx, vm.ClusterKey, node, vm.VMID, "tpmstate0", desiredStorage)
 }
 
 func normalizeSSHKeyList(values []string) ([]string, error) {
