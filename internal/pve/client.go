@@ -403,6 +403,23 @@ func (c *Client) MoveDisk(ctx context.Context, clusterKey, node string, vmid int
 	return waitProxmoxTask(ctx, task, 30*time.Minute)
 }
 
+func (c *Client) UnlinkDisk(ctx context.Context, clusterKey, node string, vmid int, disk string, force bool) error {
+	if strings.TrimSpace(disk) == "" {
+		return nil
+	}
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	vm := proxmox.VirtualMachine{}
+	vm.New(client, node, vmid)
+	task, err := vm.UnlinkDisk(ctx, disk, force)
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, task, 30*time.Minute)
+}
+
 func (c *Client) VMStatus(ctx context.Context, clusterKey, node string, vmid int) (map[string]any, error) {
 	var status map[string]any
 	if err := c.request(ctx, clusterKey, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/status/current", url.PathEscape(node), vmid), nil, &status); err != nil {

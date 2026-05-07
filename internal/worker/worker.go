@@ -984,7 +984,59 @@ func (w *Worker) moveTPMIfNeeded(ctx context.Context, vm vmRow, cluster config.C
 	if currentStorage == "" || currentStorage == desiredStorage {
 		return nil
 	}
-	return w.pve.MoveDisk(ctx, vm.ClusterKey, node, vm.VMID, "tpmstate0", desiredStorage)
+	if err := w.ensureVMStopped(ctx, vm, node); err != nil {
+		return err
+	}
+	if err := w.pve.UnlinkDisk(ctx, vm.ClusterKey, node, vm.VMID, "tpmstate0", true); err != nil {
+		return err
+	}
+	params := url.Values{}
+	params.Set("tpmstate0", tpmStateConfig(desiredStorage, raw))
+	return w.pve.SetVMConfig(ctx, vm.ClusterKey, node, vm.VMID, params)
+}
+
+func (w *Worker) ensureVMStopped(ctx context.Context, vm vmRow, node string) error {
+	status, err := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID)
+	if err != nil {
+		return err
+	}
+	if stringFromMap(status, "status", "") == "stopped" {
+		return nil
+	}
+	if err := w.pve.ShutdownVM(ctx, vm.ClusterKey, node, vm.VMID); err != nil {
+		if !isPowerTimeoutError(err) {
+			return err
+		}
+		w.logger.WarnContext(ctx, "shutdown timed out before TPM reconfiguration, falling back to hard stop", "cluster", vm.ClusterKey, "vmid", vm.VMID, "error", err)
+		if status, statusErr := w.pve.VMStatus(ctx, vm.ClusterKey, node, vm.VMID); statusErr == nil && stringFromMap(status, "status", "") == "stopped" {
+			return nil
+		}
+		return w.pve.StopVM(ctx, vm.ClusterKey, node, vm.VMID)
+	}
+	return nil
+}
+
+func tpmStateConfig(storage string, current string) string {
+	value := strings.TrimSpace(storage) + ":0"
+	if version := diskConfigOption(current, "version"); version != "" {
+		value += ",version=" + version
+	}
+	return value
+}
+
+func diskConfigOption(raw string, key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	for _, part := range strings.Split(raw, ",") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
 }
 
 func normalizeSSHKeyList(values []string) ([]string, error) {
