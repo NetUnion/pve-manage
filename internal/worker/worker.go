@@ -193,6 +193,9 @@ func (w *Worker) syncOnce(ctx context.Context) error {
 	if err := w.ensureExpiredDeleteTasks(ctx); err != nil {
 		return err
 	}
+	if err := w.cancelSupersededTasksForDeletingVMs(ctx); err != nil {
+		return err
+	}
 
 	tasks, err := w.pendingTasks(ctx)
 	if err != nil {
@@ -464,6 +467,23 @@ func (w *Worker) ensureExpiredDeleteTasks(ctx context.Context) error {
 		w.logger.InfoContext(ctx, "queued expired vm delete", "vm_id", id)
 	}
 	return nil
+}
+
+func (w *Worker) cancelSupersededTasksForDeletingVMs(ctx context.Context) error {
+	now := timestamp()
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'canceled', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+		WHERE kind <> 'delete'
+		  AND status NOT IN ('done', 'canceled')
+		  AND vm_id IN (
+		      SELECT id
+		      FROM vms
+		      WHERE deleted_at IS NULL
+		        AND delete_requested_at IS NOT NULL
+		  )
+	`, now, now)
+	return err
 }
 
 func (w *Worker) queueVMTask(ctx context.Context, vmID int64, kind string, payload any) error {
