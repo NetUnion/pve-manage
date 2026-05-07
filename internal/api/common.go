@@ -264,7 +264,7 @@ func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, vm_id, seq, kind, payload_json, status, error, created_at, updated_at, started_at, finished_at
 		FROM vm_tasks
-		WHERE vm_id = ?
+		WHERE vm_id = ? AND status <> 'canceled'
 		ORDER BY seq, id
 	`, vmID)
 	if err != nil {
@@ -302,7 +302,8 @@ func (s *Server) loadAllVMTasks(ctx context.Context, includeCompleted bool) ([]a
 			v.owner_username, v.cluster_key, v.vmid, v.vmname, v.node, v.managed, v.quota_exempt, v.sync_state
 		FROM vm_tasks vt
 		JOIN vms v ON v.id = vt.vm_id
-		WHERE (? = 1 OR vt.status <> 'done')
+		WHERE vt.status <> 'canceled'
+		  AND (? = 1 OR vt.status <> 'done')
 		ORDER BY vt.created_at DESC, vt.id DESC
 	`, boolToInt(includeCompleted))
 	if err != nil {
@@ -412,6 +413,17 @@ func queueVMTaskTx(ctx context.Context, tx *sql.Tx, vmID int64, kind string, pay
 		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
 		VALUES(?,?,?,?, 'pending', ?, ?)
 	`, vmID, nextSeq, kind, payloadJSON, now, now)
+	return err
+}
+
+func cancelVMTasksTx(ctx context.Context, tx *sql.Tx, vmID int64) error {
+	now := timestamp()
+	_, err := tx.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'canceled', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+		WHERE vm_id = ?
+		  AND status NOT IN ('done', 'canceled')
+	`, now, now, vmID)
 	return err
 }
 

@@ -1126,6 +1126,10 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if err := cancelVMTasksTx(r.Context(), tx, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err := queueVMTaskTx(r.Context(), tx, vm.ID, "delete", map[string]any{"vm_id": vm.ID, "execute_after": execStr}); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1279,6 +1283,10 @@ func (s *Server) handleDeleteNowVM(w http.ResponseWriter, r *http.Request) {
 		    delete_execute_after = ?, updated_at = ?, version = version + 1
 		WHERE id = ?
 	`, string(preferBytes), nowStr, nowStr, nowStr, vm.ID); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := cancelVMTasksTx(r.Context(), tx, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
