@@ -101,6 +101,7 @@ func runWorker(logger *slog.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
+	logger.Info("worker runtime loaded", "db", runtime.DBPath, "config", runtime.ConfigPath, "token", runtime.TokenPath)
 
 	cfg, err := config.Load(runtime)
 	if err != nil {

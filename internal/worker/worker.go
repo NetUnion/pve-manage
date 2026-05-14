@@ -127,8 +127,13 @@ func (w *Worker) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	w.logger.Info("worker started")
-	if err := w.recoverAbandonedRunningTasks(ctx); err != nil {
+	recoverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	recoveredMaintenance, recoveredVM, err := w.recoverAbandonedRunningTasks(recoverCtx)
+	cancel()
+	if err != nil {
 		w.logger.WarnContext(ctx, "recover abandoned running tasks failed", "error", err)
+	} else {
+		w.logger.InfoContext(ctx, "abandoned running tasks recovered", "maintenance_tasks", recoveredMaintenance, "vm_tasks", recoveredVM)
 	}
 
 	for {
@@ -145,9 +150,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) error {
+func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) (int64, int64, error) {
 	now := timestamp()
-	if _, err := w.db.ExecContext(ctx, `
+	res, err := w.db.ExecContext(ctx, `
 		UPDATE maintenance_tasks
 		SET status = 'pending',
 		    error = NULL,
@@ -155,10 +160,12 @@ func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) error {
 		    updated_at = ?
 		WHERE status = 'running'
 		  AND finished_at IS NULL
-	`, now); err != nil {
-		return err
+	`, now)
+	if err != nil {
+		return 0, 0, err
 	}
-	_, err := w.db.ExecContext(ctx, `
+	maintenanceCount, _ := res.RowsAffected()
+	res, err = w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
 		SET status = 'pending',
 		    error = NULL,
@@ -167,13 +174,17 @@ func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) error {
 		WHERE status = 'running'
 		  AND finished_at IS NULL
 	`, now)
-	return err
+	if err != nil {
+		return maintenanceCount, 0, err
+	}
+	vmCount, _ := res.RowsAffected()
+	return maintenanceCount, vmCount, nil
 }
 
-func (w *Worker) recoverStaleRunningTasks(ctx context.Context) error {
+func (w *Worker) recoverStaleRunningTasks(ctx context.Context) (int64, int64, error) {
 	now := timestamp()
 	cutoff := time.Now().UTC().Add(-abandonedRunningTaskAfter).Format(time.RFC3339Nano)
-	if _, err := w.db.ExecContext(ctx, `
+	res, err := w.db.ExecContext(ctx, `
 		UPDATE maintenance_tasks
 		SET status = 'pending',
 		    error = NULL,
@@ -182,10 +193,12 @@ func (w *Worker) recoverStaleRunningTasks(ctx context.Context) error {
 		WHERE status = 'running'
 		  AND finished_at IS NULL
 		  AND updated_at <= ?
-	`, now, cutoff); err != nil {
-		return err
+	`, now, cutoff)
+	if err != nil {
+		return 0, 0, err
 	}
-	_, err := w.db.ExecContext(ctx, `
+	maintenanceCount, _ := res.RowsAffected()
+	res, err = w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
 		SET status = 'pending',
 		    error = NULL,
@@ -195,12 +208,19 @@ func (w *Worker) recoverStaleRunningTasks(ctx context.Context) error {
 		  AND finished_at IS NULL
 		  AND updated_at <= ?
 	`, now, cutoff)
-	return err
+	if err != nil {
+		return maintenanceCount, 0, err
+	}
+	vmCount, _ := res.RowsAffected()
+	return maintenanceCount, vmCount, nil
 }
 
 func (w *Worker) syncOnce(ctx context.Context) error {
-	if err := w.recoverStaleRunningTasks(ctx); err != nil {
+	recoveredMaintenance, recoveredVM, err := w.recoverStaleRunningTasks(ctx)
+	if err != nil {
 		w.logger.WarnContext(ctx, "recover stale running tasks failed", "error", err)
+	} else if recoveredMaintenance > 0 || recoveredVM > 0 {
+		w.logger.WarnContext(ctx, "stale running tasks recovered", "maintenance_tasks", recoveredMaintenance, "vm_tasks", recoveredVM)
 	}
 	if err := w.ensureMaintenanceTasks(ctx); err != nil {
 		return err
