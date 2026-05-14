@@ -157,9 +157,9 @@ func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) (int64, int64
 		SET status = 'pending',
 		    error = NULL,
 		    started_at = NULL,
+		    finished_at = NULL,
 		    updated_at = ?
 		WHERE status = 'running'
-		  AND finished_at IS NULL
 	`, now)
 	if err != nil {
 		return 0, 0, err
@@ -170,9 +170,9 @@ func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) (int64, int64
 		SET status = 'pending',
 		    error = NULL,
 		    started_at = NULL,
+		    finished_at = NULL,
 		    updated_at = ?
 		WHERE status = 'running'
-		  AND finished_at IS NULL
 	`, now)
 	if err != nil {
 		return maintenanceCount, 0, err
@@ -189,9 +189,9 @@ func (w *Worker) recoverStaleRunningTasks(ctx context.Context) (int64, int64, er
 		SET status = 'pending',
 		    error = NULL,
 		    started_at = NULL,
+		    finished_at = NULL,
 		    updated_at = ?
 		WHERE status = 'running'
-		  AND finished_at IS NULL
 		  AND updated_at <= ?
 	`, now, cutoff)
 	if err != nil {
@@ -203,9 +203,9 @@ func (w *Worker) recoverStaleRunningTasks(ctx context.Context) (int64, int64, er
 		SET status = 'pending',
 		    error = NULL,
 		    started_at = NULL,
+		    finished_at = NULL,
 		    updated_at = ?
 		WHERE status = 'running'
-		  AND finished_at IS NULL
 		  AND updated_at <= ?
 	`, now, cutoff)
 	if err != nil {
