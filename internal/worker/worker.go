@@ -28,6 +28,12 @@ type Worker struct {
 	pve    *pve.Client
 }
 
+const (
+	maintenanceTaskInterval   = 10 * time.Minute
+	maintenanceTaskRetryAfter = 1 * time.Minute
+	abandonedRunningTaskAfter = 30 * time.Minute
+)
+
 type vmRow struct {
 	ID                  int64
 	OwnerUsername       string
@@ -164,7 +170,38 @@ func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) error {
 	return err
 }
 
+func (w *Worker) recoverStaleRunningTasks(ctx context.Context) error {
+	now := timestamp()
+	cutoff := time.Now().UTC().Add(-abandonedRunningTaskAfter).Format(time.RFC3339Nano)
+	if _, err := w.db.ExecContext(ctx, `
+		UPDATE maintenance_tasks
+		SET status = 'pending',
+		    error = NULL,
+		    started_at = NULL,
+		    updated_at = ?
+		WHERE status = 'running'
+		  AND finished_at IS NULL
+		  AND updated_at <= ?
+	`, now, cutoff); err != nil {
+		return err
+	}
+	_, err := w.db.ExecContext(ctx, `
+		UPDATE vm_tasks
+		SET status = 'pending',
+		    error = NULL,
+		    started_at = NULL,
+		    updated_at = ?
+		WHERE status = 'running'
+		  AND finished_at IS NULL
+		  AND updated_at <= ?
+	`, now, cutoff)
+	return err
+}
+
 func (w *Worker) syncOnce(ctx context.Context) error {
+	if err := w.recoverStaleRunningTasks(ctx); err != nil {
+		w.logger.WarnContext(ctx, "recover stale running tasks failed", "error", err)
+	}
 	if err := w.ensureMaintenanceTasks(ctx); err != nil {
 		return err
 	}
@@ -242,7 +279,7 @@ func (w *Worker) ensureMaintenanceTasks(ctx context.Context) error {
 			return nil
 		}
 		if finishedAt.Valid {
-			if t, parseErr := parseTime(finishedAt.String); parseErr == nil && time.Since(t) < 10*time.Minute {
+			if t, parseErr := parseTime(finishedAt.String); parseErr == nil && time.Since(t) < maintenanceTaskInterval {
 				return nil
 			}
 		}
@@ -263,7 +300,7 @@ func (w *Worker) pendingMaintenanceTasks(ctx context.Context) ([]maintenanceTask
 		   OR (status = 'failed' AND updated_at <= ?)
 		ORDER BY id
 		LIMIT 10
-	`, time.Now().UTC().Add(-1*time.Minute).Format(time.RFC3339Nano))
+	`, time.Now().UTC().Add(-maintenanceTaskRetryAfter).Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +332,11 @@ func (w *Worker) markMaintenanceTaskRunning(ctx context.Context, taskID int64) e
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE maintenance_tasks
-		SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
+		SET status = 'running',
+		    error = NULL,
+		    started_at = COALESCE(started_at, ?),
+		    finished_at = NULL,
+		    updated_at = ?
 		WHERE id = ?
 	`, now, now, taskID)
 	return err
@@ -305,7 +346,7 @@ func (w *Worker) markMaintenanceTaskDone(ctx context.Context, taskID int64) erro
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE maintenance_tasks
-		SET status = 'done', finished_at = COALESCE(finished_at, ?), updated_at = ?
+		SET status = 'done', error = NULL, finished_at = COALESCE(finished_at, ?), updated_at = ?
 		WHERE id = ?
 	`, now, now, taskID)
 	return err
@@ -594,7 +635,11 @@ func (w *Worker) markTaskRunning(ctx context.Context, taskID int64) error {
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
-		SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?
+		SET status = 'running',
+		    error = NULL,
+		    started_at = COALESCE(started_at, ?),
+		    finished_at = NULL,
+		    updated_at = ?
 		WHERE id = ?
 	`, now, now, taskID)
 	return err
