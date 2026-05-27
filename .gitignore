@@ -7,3 +7,5 @@ internal/webui/static/*
 temp/
 *.sqlite3
 *.tar
+
+/.codex/

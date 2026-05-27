@@ -963,6 +963,12 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 	if intFromMapAny(cfg, "memory") != intFrom(prefer, "memory_gb")*1024 {
 		params.Set("memory", strconv.Itoa(intFrom(prefer, "memory_gb")*1024))
 	}
+	if desiredMemoryMiB := intFrom(prefer, "memory_gb") * 1024; desiredMemoryMiB > 0 {
+		desiredBalloonMiB := desiredMinMemoryMiB(desiredMemoryMiB)
+		if intFromMapAny(cfg, "balloon") != desiredBalloonMiB {
+			params.Set("balloon", strconv.Itoa(desiredBalloonMiB))
+		}
+	}
 	if stringFromMap(cfg, "ciuser", "") != "root" {
 		params.Set("ciuser", "root")
 	}
@@ -1015,6 +1021,13 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 		return w.markPasswordSynced(ctx, vm.ID)
 	}
 	return nil
+}
+
+func desiredMinMemoryMiB(memoryMiB int) int {
+	if memoryMiB <= 0 {
+		return 0
+	}
+	return int(math.Ceil(float64(memoryMiB) * 0.75))
 }
 
 func (w *Worker) moveDiskIfNeeded(ctx context.Context, vm vmRow, prefer map[string]any, cfg map[string]any, node string) error {
