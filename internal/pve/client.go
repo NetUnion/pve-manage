@@ -335,7 +335,7 @@ func (c *Client) GetVMConfig(ctx context.Context, clusterKey, node string, vmid 
 	return cfg, nil
 }
 
-func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode string, templateVMID int, targetNode string, newVMID int, name string, storage string, pool string) error {
+func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode string, templateVMID int, newVMID int, name string, storage string, pool string) error {
 	client, err := c.clusterClient(clusterKey)
 	if err != nil {
 		return err
@@ -351,10 +351,33 @@ func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode 
 	if pool != "" {
 		params.Pool = pool
 	}
-	if targetNode != "" && targetNode != templateNode {
-		params.Target = targetNode
-	}
 	_, task, err := vm.Clone(ctx, params)
+	if err != nil {
+		return err
+	}
+	return waitProxmoxTask(ctx, task, 30*time.Minute)
+}
+
+func (c *Client) MigrateVM(ctx context.Context, clusterKey string, sourceNode string, vmid int, targetNode string, targetStorage string) error {
+	sourceNode = strings.TrimSpace(sourceNode)
+	targetNode = strings.TrimSpace(targetNode)
+	if sourceNode == "" || targetNode == "" || sourceNode == targetNode {
+		return nil
+	}
+	client, err := c.clusterClient(clusterKey)
+	if err != nil {
+		return err
+	}
+	vm := proxmox.VirtualMachine{}
+	vm.New(client, sourceNode, vmid)
+	params := &proxmox.VirtualMachineMigrateOptions{
+		Target:         targetNode,
+		WithLocalDisks: proxmox.IntOrBool(true),
+	}
+	if strings.TrimSpace(targetStorage) != "" {
+		params.TargetStorage = strings.TrimSpace(targetStorage)
+	}
+	task, err := vm.Migrate(ctx, params)
 	if err != nil {
 		return err
 	}

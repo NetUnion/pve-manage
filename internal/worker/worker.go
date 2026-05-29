@@ -910,18 +910,25 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 		return "", err
 	}
 	desiredName := prefixedVMName(vm.OwnerUsername, vm.VMName)
-	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, targetNode, vm.VMID, desiredName, storage, poolID); err != nil {
+	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, vm.VMID, desiredName, storage, poolID); err != nil {
 		return "", err
+	}
+	currentNode := template.Node
+	if targetNode != "" && targetNode != template.Node {
+		if err := w.pve.MigrateVM(ctx, vm.ClusterKey, template.Node, vm.VMID, targetNode, storage); err != nil {
+			if cleanupErr := w.pve.DeleteVM(ctx, vm.ClusterKey, currentNode, vm.VMID); cleanupErr != nil {
+				w.logger.WarnContext(ctx, "cleanup failed vm after migration error", "cluster", vm.ClusterKey, "vmid", vm.VMID, "node", currentNode, "error", cleanupErr)
+			}
+			return "", err
+		}
+		currentNode = targetNode
 	}
 	if node, ok, err := w.pve.FindVMNode(ctx, vm.ClusterKey, vm.VMID); err != nil {
 		return "", err
 	} else if ok {
 		return node, nil
 	}
-	if targetNode != "" {
-		return targetNode, nil
-	}
-	return template.Node, nil
+	return currentNode, nil
 }
 
 func (w *Worker) configureVM(ctx context.Context, vm vmRow, prefer map[string]any, cluster config.Cluster, node string) error {
