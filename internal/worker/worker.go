@@ -1071,8 +1071,11 @@ func (w *Worker) moveTPMIfNeeded(ctx context.Context, vm vmRow, cluster config.C
 	if currentStorage == "" || currentStorage == desiredStorage {
 		return nil
 	}
-	w.logger.WarnContext(ctx, "skipping destructive TPM storage migration", "vmid", vm.VMID, "from", currentStorage, "to", desiredStorage)
-	return nil
+	if err := w.ensureVMStopped(ctx, vm, node); err != nil {
+		return err
+	}
+	w.logger.InfoContext(ctx, "moving TPM state storage", "vmid", vm.VMID, "from", currentStorage, "to", desiredStorage)
+	return w.pve.MoveDisk(ctx, vm.ClusterKey, node, vm.VMID, "tpmstate0", desiredStorage)
 }
 
 func (w *Worker) ensureVMStopped(ctx context.Context, vm vmRow, node string) error {
