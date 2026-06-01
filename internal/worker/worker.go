@@ -55,6 +55,7 @@ type vmRow struct {
 	Managed             bool
 	TaskQueuePaused     bool
 	Version             int
+	DeleteRequestedAt   sql.NullString
 	DeleteExecuteAfter  sql.NullString
 }
 
@@ -421,7 +422,7 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 			vt.id, vt.kind, vt.payload_json, vt.status, vt.seq, vt.started_at, vt.finished_at,
 			v.id, v.owner_username, v.cluster_key, v.vmid, v.vmname, v.ip, v.node, v.target_node, v.password, v.sshkeys_json, v.shared_usernames_json,
 			v.security_group_name, v.uestc_restricted, v.config_json, v.prefer_status_json, v.real_status_json,
-			v.sync_state, v.managed, v.task_queue_paused, v.version, v.delete_execute_after
+			v.sync_state, v.managed, v.task_queue_paused, v.version, v.delete_requested_at, v.delete_execute_after
 		FROM vm_tasks vt
 		JOIN vms v ON v.id = vt.vm_id
 		WHERE v.deleted_at IS NULL
@@ -477,6 +478,7 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 			&current.VM.Managed,
 			&current.VM.TaskQueuePaused,
 			&current.VM.Version,
+			&current.VM.DeleteRequestedAt,
 			&current.VM.DeleteExecuteAfter,
 		); err != nil {
 			return nil, err
@@ -778,7 +780,7 @@ func (w *Worker) syncVM(ctx context.Context, vm vmRow) error {
 	}
 
 	intent, _ := prefer["intent"].(string)
-	if intent == "delete_pending" || vm.SyncState == "deleting" {
+	if intent == "delete_pending" || vm.SyncState == "deleting" || vm.DeleteRequestedAt.Valid {
 		return w.syncDelete(ctx, vm, prefer, nil)
 	}
 	return w.syncPresent(ctx, vm, prefer)
@@ -1069,15 +1071,8 @@ func (w *Worker) moveTPMIfNeeded(ctx context.Context, vm vmRow, cluster config.C
 	if currentStorage == "" || currentStorage == desiredStorage {
 		return nil
 	}
-	if err := w.ensureVMStopped(ctx, vm, node); err != nil {
-		return err
-	}
-	if err := w.pve.UnlinkDisk(ctx, vm.ClusterKey, node, vm.VMID, "tpmstate0", true); err != nil {
-		return err
-	}
-	params := url.Values{}
-	params.Set("tpmstate0", tpmStateConfig(desiredStorage, raw))
-	return w.pve.SetVMConfig(ctx, vm.ClusterKey, node, vm.VMID, params)
+	w.logger.WarnContext(ctx, "skipping destructive TPM storage migration", "vmid", vm.VMID, "from", currentStorage, "to", desiredStorage)
+	return nil
 }
 
 func (w *Worker) ensureVMStopped(ctx context.Context, vm vmRow, node string) error {
