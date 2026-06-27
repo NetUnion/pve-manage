@@ -912,11 +912,7 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 		return "", err
 	}
 	desiredName := prefixedVMName(vm.OwnerUsername, vm.VMName)
-	// Do not pass the target pool during clone. Recent PVE permission checks
-	// require VM.Allocate on /pool/<pool> when the clone request carries a pool
-	// parameter, even though we already add the VM to the owner pool in a
-	// separate step with Pool.Allocate after creation.
-	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, vm.VMID, desiredName, storage); err != nil {
+	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, vm.VMID, desiredName, storage, poolID); err != nil {
 		return "", err
 	}
 	currentNode := template.Node
