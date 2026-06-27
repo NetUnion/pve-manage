@@ -335,7 +335,7 @@ func (c *Client) GetVMConfig(ctx context.Context, clusterKey, node string, vmid 
 	return cfg, nil
 }
 
-func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode string, templateVMID int, newVMID int, name string, storage string, pool string) error {
+func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode string, templateVMID int, newVMID int, name string, storage string) error {
 	client, err := c.clusterClient(clusterKey)
 	if err != nil {
 		return err
@@ -347,9 +347,6 @@ func (c *Client) CloneFull(ctx context.Context, clusterKey string, templateNode 
 		Name:    name,
 		Full:    1,
 		Storage: storage,
-	}
-	if pool != "" {
-		params.Pool = pool
 	}
 	_, task, err := vm.Clone(ctx, params)
 	if err != nil {
