@@ -255,6 +255,7 @@ worker 从 PVE `template-pool` 扫描出来的模板记录。
 - `updated_at`
 - `started_at`
 - `finished_at`
+- `attempt_count`
 
 任务类型示例：
 
@@ -269,6 +270,9 @@ worker 从 PVE `template-pool` 扫描出来的模板记录。
 - `seq` 表示同一台 VM 内的执行顺序。
 - worker 按 `seq` 串行消费。
 - 前一个任务未完成时，后续任务不会被执行。
+- `attempt_count` 统计任务总执行次数；初次执行失败后最多自动重试 5 次。
+- 5 次自动重试分别在失败后等待 1、2、4、8、16 分钟。
+- 人工重试会把失败任务重新置为 `pending`，不受自动重试次数上限阻止。
 
 主要索引：
 

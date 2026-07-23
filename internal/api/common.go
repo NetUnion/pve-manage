@@ -114,17 +114,18 @@ type vmMetricPoint struct {
 }
 
 type vmTaskSummary struct {
-	ID         int64           `json:"id"`
-	VMID       int64           `json:"vm_id"`
-	Seq        int             `json:"seq"`
-	Kind       string          `json:"kind"`
-	Payload    json.RawMessage `json:"payload"`
-	Status     string          `json:"status"`
-	Error      *string         `json:"error,omitempty"`
-	CreatedAt  string          `json:"created_at"`
-	UpdatedAt  string          `json:"updated_at"`
-	StartedAt  *string         `json:"started_at,omitempty"`
-	FinishedAt *string         `json:"finished_at,omitempty"`
+	ID           int64           `json:"id"`
+	VMID         int64           `json:"vm_id"`
+	Seq          int             `json:"seq"`
+	Kind         string          `json:"kind"`
+	Payload      json.RawMessage `json:"payload"`
+	Status       string          `json:"status"`
+	Error        *string         `json:"error,omitempty"`
+	AttemptCount int             `json:"attempt_count"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
+	StartedAt    *string         `json:"started_at,omitempty"`
+	FinishedAt   *string         `json:"finished_at,omitempty"`
 }
 
 type adminVMTaskSummary struct {
@@ -135,6 +136,7 @@ type adminVMTaskSummary struct {
 	Payload       json.RawMessage `json:"payload"`
 	Status        string          `json:"status"`
 	Error         *string         `json:"error,omitempty"`
+	AttemptCount  int             `json:"attempt_count"`
 	CreatedAt     string          `json:"created_at"`
 	UpdatedAt     string          `json:"updated_at"`
 	StartedAt     *string         `json:"started_at,omitempty"`
@@ -262,7 +264,7 @@ func normalizeFirewallPolicyDisplay(value string) string {
 
 func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, vm_id, seq, kind, payload_json, status, error, created_at, updated_at, started_at, finished_at
+		SELECT id, vm_id, seq, kind, payload_json, status, error, attempt_count, created_at, updated_at, started_at, finished_at
 		FROM vm_tasks
 		WHERE vm_id = ? AND status <> 'canceled'
 		ORDER BY seq, id
@@ -278,7 +280,7 @@ func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, 
 		var payloadRaw string
 		var startedAt sql.NullString
 		var finishedAt sql.NullString
-		if err := rows.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.AttemptCount, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
 			return nil, err
 		}
 		item.Payload = rawJSONFromString(payloadRaw)
@@ -298,7 +300,7 @@ func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, 
 func (s *Server) loadAllVMTasks(ctx context.Context, includeCompleted bool) ([]adminVMTaskSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
-			vt.id, vt.vm_id, vt.seq, vt.kind, vt.payload_json, vt.status, vt.error, vt.created_at, vt.updated_at, vt.started_at, vt.finished_at,
+			vt.id, vt.vm_id, vt.seq, vt.kind, vt.payload_json, vt.status, vt.error, vt.attempt_count, vt.created_at, vt.updated_at, vt.started_at, vt.finished_at,
 			v.owner_username, v.cluster_key, v.vmid, v.vmname, v.node, v.managed, v.quota_exempt, v.sync_state
 		FROM vm_tasks vt
 		JOIN vms v ON v.id = vt.vm_id
@@ -318,7 +320,7 @@ func (s *Server) loadAllVMTasks(ctx context.Context, includeCompleted bool) ([]a
 		var startedAt sql.NullString
 		var finishedAt sql.NullString
 		if err := rows.Scan(
-			&item.ID, &item.VMRecordID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt,
+			&item.ID, &item.VMRecordID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.AttemptCount, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt,
 			&item.OwnerUsername, &item.ClusterKey, &item.VMID, &item.VMName, &item.Node, &item.Managed, &item.QuotaExempt, &item.SyncState,
 		); err != nil {
 			return nil, err
@@ -374,7 +376,7 @@ func (s *Server) loadMaintenanceTasks(ctx context.Context) ([]maintenanceTaskSum
 
 func (s *Server) loadVMTask(ctx context.Context, vmID, taskID int64) (*vmTaskSummary, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, vm_id, seq, kind, payload_json, status, error, created_at, updated_at, started_at, finished_at
+		SELECT id, vm_id, seq, kind, payload_json, status, error, attempt_count, created_at, updated_at, started_at, finished_at
 		FROM vm_tasks
 		WHERE vm_id = ? AND id = ?
 	`, vmID, taskID)
@@ -383,7 +385,7 @@ func (s *Server) loadVMTask(ctx context.Context, vmID, taskID int64) (*vmTaskSum
 	var payloadRaw string
 	var startedAt sql.NullString
 	var finishedAt sql.NullString
-	if err := row.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.VMID, &item.Seq, &item.Kind, &payloadRaw, &item.Status, &item.Error, &item.AttemptCount, &item.CreatedAt, &item.UpdatedAt, &startedAt, &finishedAt); err != nil {
 		return nil, err
 	}
 	item.Payload = rawJSONFromString(payloadRaw)
@@ -506,18 +508,6 @@ func validSecurityGroupName(name string) bool {
 
 func validUsernameLike(name string) bool {
 	return usernameTokenRegex.MatchString(name)
-}
-
-func prefixedVMName(owner, name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" || owner == "" {
-		return name
-	}
-	prefix := owner + "-"
-	if strings.HasPrefix(name, prefix) {
-		return name
-	}
-	return prefix + name
 }
 
 func normalizeCIDR(input string, ethertype string) (string, error) {

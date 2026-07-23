@@ -45,17 +45,18 @@ type VM struct {
 }
 
 type VMTask struct {
-	ID          int64
-	VMID        int64
-	Seq         int
-	Kind        string
-	PayloadJSON string
-	Status      string
-	Error       *string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	StartedAt   *time.Time
-	FinishedAt  *time.Time
+	ID           int64
+	VMID         int64
+	Seq          int
+	Kind         string
+	PayloadJSON  string
+	Status       string
+	Error        *string
+	AttemptCount int
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	StartedAt    *time.Time
+	FinishedAt   *time.Time
 }
 
 type SecurityGroup struct {

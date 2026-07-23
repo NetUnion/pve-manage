@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NetUnion/pve-manage/internal/vmname"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -263,8 +264,13 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	req.VMName = strings.TrimSpace(req.VMName)
 	if req.ClusterKey == "" || req.VMName == "" || req.CPUKey == "" || req.StorageKey == "" || req.BridgeKey == "" || req.SecurityGroupName == "" {
 		s.jsonError(w, http.StatusBadRequest, "missing required fields")
+		return
+	}
+	if err := vmname.ValidateManaged(current.Username, req.VMName); err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.CPUCores <= 0 || req.MemoryGB <= 0 || req.DiskGB <= 0 {
@@ -662,6 +668,14 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		targetOwner = owner
+	}
+	targetVMName := vm.VMName
+	if req.VMName != nil {
+		targetVMName = strings.TrimSpace(*req.VMName)
+	}
+	if err := vmname.ValidateManaged(targetOwner, targetVMName); err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	cfg := map[string]any{}
 	_ = json.Unmarshal(vm.Config, &cfg)
@@ -1503,12 +1517,18 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	req.OwnerUsername = strings.TrimSpace(req.OwnerUsername)
+	req.VMName = strings.TrimSpace(req.VMName)
 	if req.OwnerUsername == "" || req.VMName == "" || req.IP == "" || req.CPUKey == "" || req.StorageKey == "" || req.BridgeKey == "" || req.SecurityGroupName == "" {
 		s.jsonError(w, http.StatusBadRequest, "missing required fields")
 		return
 	}
 	if !validUsernameLike(req.OwnerUsername) {
 		s.jsonError(w, http.StatusBadRequest, "invalid owner_username")
+		return
+	}
+	if err := vmname.ValidateManaged(req.OwnerUsername, req.VMName); err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := s.loadUserRow(r.Context(), req.OwnerUsername); err != nil {

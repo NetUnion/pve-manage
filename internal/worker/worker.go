@@ -18,6 +18,7 @@ import (
 
 	"github.com/NetUnion/pve-manage/internal/config"
 	"github.com/NetUnion/pve-manage/internal/pve"
+	"github.com/NetUnion/pve-manage/internal/vmname"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -32,6 +33,8 @@ const (
 	maintenanceTaskInterval   = 10 * time.Minute
 	maintenanceTaskRetryAfter = 1 * time.Minute
 	abandonedRunningTaskAfter = 30 * time.Minute
+	maxVMTaskAutoRetries      = 5
+	maxPendingVMTasks         = 20
 )
 
 type vmRow struct {
@@ -70,14 +73,16 @@ type vmMetricPoint struct {
 }
 
 type vmTaskRow struct {
-	TaskID      int64
-	VM          vmRow
-	Kind        string
-	PayloadJSON string
-	Status      string
-	Seq         int
-	StartedAt   sql.NullString
-	FinishedAt  sql.NullString
+	TaskID       int64
+	VM           vmRow
+	Kind         string
+	PayloadJSON  string
+	Status       string
+	Seq          int
+	AttemptCount int
+	UpdatedAt    string
+	StartedAt    sql.NullString
+	FinishedAt   sql.NullString
 }
 
 type maintenanceTaskRow struct {
@@ -264,10 +269,16 @@ func (w *Worker) syncOnce(ctx context.Context) error {
 			w.logger.ErrorContext(ctx, "update running task state", "task_id", task.TaskID, "error", err)
 			continue
 		}
+		task.AttemptCount++
 		if err := w.runTask(ctx, task); err != nil {
 			w.logger.ErrorContext(ctx, "run vm task failed", "task_id", task.TaskID, "vm_id", task.VM.ID, "kind", task.Kind, "error", err)
 			if updateErr := w.markTaskFailed(ctx, task.TaskID, err.Error()); updateErr != nil {
 				w.logger.ErrorContext(ctx, "update failed task state", "task_id", task.TaskID, "error", updateErr)
+			}
+			if task.AttemptCount > maxVMTaskAutoRetries {
+				if updateErr := w.markFailed(ctx, task.VM.ID, err.Error()); updateErr != nil {
+					w.logger.ErrorContext(ctx, "update failed vm state", "vm_id", task.VM.ID, "error", updateErr)
+				}
 			}
 			continue
 		}
@@ -419,7 +430,7 @@ func (w *Worker) purgeOldTasks(ctx context.Context) error {
 func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 	rows, err := w.db.QueryContext(ctx, `
 		SELECT
-			vt.id, vt.kind, vt.payload_json, vt.status, vt.seq, vt.started_at, vt.finished_at,
+			vt.id, vt.kind, vt.payload_json, vt.status, vt.seq, vt.attempt_count, vt.updated_at, vt.started_at, vt.finished_at,
 			v.id, v.owner_username, v.cluster_key, v.vmid, v.vmname, v.ip, v.node, v.target_node, v.password, v.sshkeys_json, v.shared_usernames_json,
 			v.security_group_name, v.uestc_restricted, v.config_json, v.prefer_status_json, v.real_status_json,
 			v.sync_state, v.managed, v.task_queue_paused, v.version, v.delete_requested_at, v.delete_execute_after
@@ -430,7 +441,10 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 		  AND v.task_queue_paused = 0
 		  AND (
 		    vt.status = 'pending'
-		    OR (vt.status = 'failed' AND vt.updated_at <= ?)
+		    OR (
+		      vt.status = 'failed'
+		      AND vt.attempt_count BETWEEN 1 AND ?
+		    )
 		  )
 		  AND NOT EXISTS (
 		      SELECT 1
@@ -440,14 +454,14 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 		        AND prev.status NOT IN ('done', 'canceled')
 		  )
 		ORDER BY vt.vm_id, vt.seq, vt.id
-		LIMIT 20
-	`, time.Now().UTC().Add(-1*time.Minute).Format(time.RFC3339Nano))
+	`, maxVMTaskAutoRetries)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	items := make([]vmTaskRow, 0)
+	now := time.Now().UTC()
 	for rows.Next() {
 		var current vmTaskRow
 		if err := rows.Scan(
@@ -456,6 +470,8 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 			&current.PayloadJSON,
 			&current.Status,
 			&current.Seq,
+			&current.AttemptCount,
+			&current.UpdatedAt,
 			&current.StartedAt,
 			&current.FinishedAt,
 			&current.VM.ID,
@@ -483,9 +499,37 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 		); err != nil {
 			return nil, err
 		}
+		if !vmTaskReady(current, now) {
+			continue
+		}
 		items = append(items, current)
+		if len(items) == maxPendingVMTasks {
+			break
+		}
 	}
 	return items, rows.Err()
+}
+
+func vmTaskReady(task vmTaskRow, now time.Time) bool {
+	if task.Status == "pending" {
+		return true
+	}
+	delay, ok := vmTaskRetryDelay(task.AttemptCount)
+	if !ok {
+		return false
+	}
+	updatedAt, err := parseTime(task.UpdatedAt)
+	if err != nil {
+		return true
+	}
+	return !now.Before(updatedAt.Add(delay))
+}
+
+func vmTaskRetryDelay(attemptCount int) (time.Duration, bool) {
+	if attemptCount < 1 || attemptCount > maxVMTaskAutoRetries {
+		return 0, false
+	}
+	return time.Minute * time.Duration(1<<(attemptCount-1)), true
 }
 
 func (w *Worker) ensureExpiredDeleteTasks(ctx context.Context) error {
@@ -659,6 +703,7 @@ func (w *Worker) markTaskRunning(ctx context.Context, taskID int64) error {
 		UPDATE vm_tasks
 		SET status = 'running',
 		    error = NULL,
+		    attempt_count = attempt_count + 1,
 		    started_at = COALESCE(started_at, ?),
 		    finished_at = NULL,
 		    updated_at = ?
@@ -907,11 +952,14 @@ func (w *Worker) createVM(ctx context.Context, vm vmRow, prefer map[string]any, 
 	if storage == "" {
 		return "", fmt.Errorf("storage_key is required")
 	}
+	desiredName := vmname.Prefixed(vm.OwnerUsername, vm.VMName)
+	if err := vmname.ValidatePVE(desiredName); err != nil {
+		return "", err
+	}
 	poolID := userPoolID(vm.OwnerUsername)
 	if err := w.pve.EnsurePool(ctx, vm.ClusterKey, poolID); err != nil {
 		return "", err
 	}
-	desiredName := prefixedVMName(vm.OwnerUsername, vm.VMName)
 	if err := w.pve.CloneFull(ctx, vm.ClusterKey, template.Node, template.VMID, vm.VMID, desiredName, storage, poolID); err != nil {
 		return "", err
 	}
@@ -962,7 +1010,10 @@ func (w *Worker) applyVMConfigIfNeeded(ctx context.Context, vm vmRow, prefer map
 	params := url.Values{}
 	var passwordChanged bool
 	configState := parseJSONMap(vm.ConfigJSON)
-	desiredName := prefixedVMName(vm.OwnerUsername, vm.VMName)
+	desiredName := vmname.Prefixed(vm.OwnerUsername, vm.VMName)
+	if err := vmname.ValidatePVE(desiredName); err != nil {
+		return err
+	}
 	if stringFromMap(cfg, "name", "") != desiredName {
 		params.Set("name", desiredName)
 	}
@@ -1216,19 +1267,6 @@ func normalizeBootOrder(value string) string {
 	default:
 		return ""
 	}
-}
-
-func prefixedVMName(owner, name string) string {
-	owner = strings.TrimSpace(owner)
-	name = strings.TrimSpace(name)
-	if owner == "" || name == "" {
-		return name
-	}
-	prefix := owner + "-"
-	if strings.HasPrefix(name, prefix) {
-		return name
-	}
-	return prefix + name
 }
 
 func truthy(v any) bool {

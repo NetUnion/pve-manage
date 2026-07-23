@@ -283,6 +283,13 @@ WHERE target_node IS NULL OR TRIM(target_node) = '';
 ALTER TABLE vms ADD COLUMN quota_exempt INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		Version: 15,
+		Name:    "vm_task_attempt_count",
+		SQL: `
+ALTER TABLE vm_tasks ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 func Migrate(ctx context.Context, db *sql.DB) error {

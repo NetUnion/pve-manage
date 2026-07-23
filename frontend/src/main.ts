@@ -153,6 +153,7 @@ type VMTask = {
   payload: Record<string, unknown>
   status: string
   error?: string | null
+  attempt_count: number
   created_at: string
   updated_at: string
   started_at?: string | null
@@ -167,6 +168,7 @@ type AdminVMTask = {
   payload: Record<string, unknown>
   status: string
   error?: string | null
+  attempt_count: number
   created_at: string
   updated_at: string
   started_at?: string | null
@@ -492,7 +494,7 @@ app.innerHTML = `
         <div class="form-grid compact">
           <label id="vm-owner-row" class="hidden">Owner<input id="vm-owner" class="input" placeholder="owner username" /></label>
           <label id="vm-template-row">Template<select id="vm-template" class="input"></select></label>
-          <label>名称<input id="vm-name" class="input" /></label>
+          <label>名称<input id="vm-name" class="input" placeholder="例如 mysql-test" title="仅允许字母、数字、连字符和点；每段必须以字母或数字开头和结尾" /></label>
           <label id="vm-ip-row" class="hidden">IP/CIDR<input id="vm-ip" class="input" placeholder="10.10.80.11/18" /></label>
           <label>CPU Type<select id="vm-cpu-key" class="input"></select></label>
           <label>CPU 核数<input id="vm-cpu-cores" class="input" type="number" min="1" /></label>
@@ -983,6 +985,23 @@ function chooseCpuKeyForNode(cluster: ClusterOption, node?: string): string {
 function stripVmNamePrefix(owner: string, name: string): string {
   const prefix = `${owner.trim()}-`
   return name.startsWith(prefix) ? name.slice(prefix.length) : name
+}
+
+function finalPVEVMName(owner: string, name: string): string {
+  const trimmedOwner = owner.trim()
+  const trimmedName = name.trim()
+  const prefix = `${trimmedOwner}-`
+  return trimmedOwner && trimmedName && !trimmedName.startsWith(prefix) ? `${prefix}${trimmedName}` : trimmedName
+}
+
+function validatePVEVMName(owner: string, name: string): void {
+  const finalName = finalPVEVMName(owner, name)
+  const validLabel = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/
+  if (!finalName || !finalName.split('.').every((label) => validLabel.test(label))) {
+    throw new Error(
+      `VM 名称无效：最终 PVE 名称“${finalName || name}”只能包含字母、数字、连字符和点，且每段必须以字母或数字开头和结尾。`,
+    )
+  }
 }
 
 function getSelectedCluster(): ClusterOption | undefined {
@@ -1842,7 +1861,7 @@ function renderAdminVMTasks() {
                 <td>${task.managed ? 'yes' : 'no'}</td>
                 <td>${task.quota_exempt ? 'yes' : 'no'}</td>
                 <td>
-                  <div class="strong">${escapeHtml(taskKindLabel(task.kind))} #${task.seq}</div>
+                  <div class="strong">${escapeHtml(taskKindLabel(task.kind))} #${task.seq} · 执行 ${task.attempt_count} 次</div>
                   <div class="mono">${escapeHtml(JSON.stringify(task.payload))}</div>
                   ${task.error ? `<div class="task-error mono">${escapeHtml(task.error)}</div>` : ''}
                 </td>
@@ -2585,7 +2604,7 @@ function renderDetail(vm: VM) {
                     <section class="task-item">
                       <div class="task-head">
                         <div>
-                          <div class="strong">${escapeHtml(taskKindLabel(task.kind))} #${task.seq}</div>
+                          <div class="strong">${escapeHtml(taskKindLabel(task.kind))} #${task.seq} · 执行 ${task.attempt_count} 次</div>
                           <div class="task-meta mono">#${task.id} · ${escapeHtml(formatTime(task.created_at))}</div>
                         </div>
                         <div class="task-head-actions">
@@ -3035,6 +3054,15 @@ async function submitVmForm(event: SubmitEvent) {
       flash('请先完成前面的步骤，再保存。', 'error')
       return
     }
+    const owner =
+      state.vmDialogMode === 'create'
+        ? state.me?.username || ''
+        : state.vmDialogMode === 'adopt'
+          ? els.vmOwner.value
+          : state.me?.is_admin
+            ? els.vmOwner.value || state.vmDialogVm?.owner_username || ''
+            : state.vmDialogVm?.owner_username || ''
+    validatePVEVMName(owner, els.vmName.value)
     if (state.vmDialogMode === 'create') {
       await api('/api/vms', {
         method: 'POST',
