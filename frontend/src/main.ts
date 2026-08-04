@@ -295,7 +295,7 @@ if (!app) {
 app.innerHTML = `
   <header class="topbar">
     <div class="brand">
-      <div class="brand-title">NetUnion & CNSS Cloud</div>
+      <div class="brand-title">NetUnion & CNSS & NSCC Cloud</div>
       <div class="brand-subtitle">虚拟机控制台</div>
     </div>
     <div class="topbar-actions">
