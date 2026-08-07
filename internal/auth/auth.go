@@ -181,7 +181,7 @@ func (m *Manager) CurrentUser(r *http.Request) (*model.User, error) {
 	err = m.db.QueryRowContext(r.Context(), `
 		SELECT id, username, email, name, groups_json, is_active, is_admin, created_at, updated_at, last_login_at
 		FROM users
-		WHERE username = ? AND is_active = 1
+		WHERE username = $1 AND is_active = 1
 	`, username).Scan(
 		&user.ID,
 		&user.Username,
@@ -242,9 +242,10 @@ func (m *Manager) upsertUser(ctx context.Context, claims Claims, isAdmin bool) (
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
-	res, err := m.db.ExecContext(ctx, `
+	var id int64
+	err = m.db.QueryRowContext(ctx, `
 		INSERT INTO users(username, email, name, groups_json, is_active, is_admin, created_at, updated_at, last_login_at)
-		VALUES(?, ?, ?, ?, 1, ?, ?, ?, ?)
+		VALUES($1, $2, $3, $4, 1, $5, $6, $7, $8)
 		ON CONFLICT(username) DO UPDATE SET
 			email = excluded.email,
 			name = excluded.name,
@@ -252,11 +253,12 @@ func (m *Manager) upsertUser(ctx context.Context, claims Claims, isAdmin bool) (
 			is_admin = excluded.is_admin,
 			updated_at = excluded.updated_at,
 			last_login_at = excluded.last_login_at
-	`, claims.Username, claims.Email, claims.Name, string(groupsJSON), boolToInt(isAdmin), now, now, now)
+		RETURNING id
+	`, claims.Username, claims.Email, claims.Name, string(groupsJSON), boolToInt(isAdmin), now, now, now).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	return id, nil
 }
 
 func (m *Manager) userIsAdmin(groups []string) bool {

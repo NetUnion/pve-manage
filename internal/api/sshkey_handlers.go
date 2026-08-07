@@ -76,7 +76,7 @@ func (s *Server) handleCreateSSHKey(w http.ResponseWriter, r *http.Request) {
 	now := timestamp()
 	if _, err := s.db.ExecContext(r.Context(), `
 		INSERT INTO ssh_keys(owner_username, name, public_key, created_at, updated_at)
-		VALUES(?,?,?,?,?)
+		VALUES($1,$2,$3,$4,$5)
 	`, current.Username, req.Name, publicKey, now, now); err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -97,7 +97,7 @@ func (s *Server) handleDeleteSSHKey(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.db.ExecContext(r.Context(), `
 		DELETE FROM ssh_keys
-		WHERE owner_username = ? AND id = ?
+		WHERE owner_username = $1 AND id = $2
 	`, current.Username, id)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())

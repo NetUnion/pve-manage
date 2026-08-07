@@ -17,7 +17,7 @@ var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$`)
 
 type Runtime struct {
 	ListenAddr string
-	DBPath     string
+	DBURL      string
 	ConfigPath string
 	OIDCPath   string
 	TokenPath  string

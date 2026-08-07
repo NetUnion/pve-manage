@@ -26,7 +26,7 @@ func (s *Server) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	`
 	args := make([]any, 0)
 	if clusterKey != "" {
-		query += " WHERE cluster_key = ?"
+		query += " WHERE cluster_key = $1"
 		args = append(args, clusterKey)
 	}
 	query += " ORDER BY cluster_key, template_vmid"
@@ -371,7 +371,7 @@ func (s *Server) handleAdminPatchVM(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRowContext(r.Context(), `
 		SELECT COUNT(1)
 		FROM vms
-		WHERE cluster_key = ? AND ip = ? AND id != ? AND deleted_at IS NULL
+		WHERE cluster_key = $1 AND ip = $2 AND id != $3 AND deleted_at IS NULL
 	`, vm.ClusterKey, req.IP, vm.ID).Scan(&conflict); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -404,8 +404,8 @@ func (s *Server) handleAdminPatchVM(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET ip = ?, config_json = ?, prefer_status_json = ?, sync_state = 'pending', sync_error = NULL, updated_at = ?, version = version + 1
-		WHERE id = ?
+		SET ip = $1, config_json = $2, prefer_status_json = $3, sync_state = 'pending', sync_error = NULL, updated_at = $4, version = version + 1
+		WHERE id = $5
 	`, req.IP, string(cfgBytes), string(preferBytes), now, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -477,9 +477,9 @@ func (s *Server) handleAdminSetQuotaExempt(w http.ResponseWriter, r *http.Reques
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET quota_exempt = ?, config_json = ?, prefer_status_json = ?, sync_state = CASE WHEN managed = 1 THEN 'pending' ELSE sync_state END,
-		    sync_error = NULL, updated_at = ?, version = version + 1
-		WHERE id = ?
+		SET quota_exempt = $1, config_json = $2, prefer_status_json = $3, sync_state = CASE WHEN managed = 1 THEN 'pending' ELSE sync_state END,
+		    sync_error = NULL, updated_at = $4, version = version + 1
+		WHERE id = $5
 	`, boolToInt(req.QuotaExempt), string(cfgBytes), string(preferBytes), now, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return

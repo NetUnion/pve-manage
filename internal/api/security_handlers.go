@@ -37,7 +37,7 @@ func (s *Server) handleListSecurityGroups(w http.ResponseWriter, r *http.Request
 	rows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
 		FROM security_groups
-		WHERE owner_username = ?
+		WHERE owner_username = $1
 		ORDER BY owner_username, name
 	`, current.Username)
 	if err != nil {
@@ -72,7 +72,7 @@ func (s *Server) handleGetSecurityGroup(w http.ResponseWriter, r *http.Request) 
 	row := s.db.QueryRowContext(r.Context(), `
 		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
 		FROM security_groups
-		WHERE owner_username = ? AND name = ?
+		WHERE owner_username = $1 AND name = $2
 	`, current.Username, name)
 	var item securityGroupSummary
 	var rulesRaw string
@@ -132,7 +132,7 @@ func (s *Server) handleCreateSecurityGroup(w http.ResponseWriter, r *http.Reques
 	now := timestamp()
 	if _, err := s.db.ExecContext(r.Context(), `
 		INSERT INTO security_groups(owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?)
+		VALUES($1,$2,$3,$4,$5,$6,$7)
 	`, current.Username, req.Name, rulesJSON, policyIn, policyOut, now, now); err != nil {
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -176,8 +176,8 @@ func (s *Server) handlePatchSecurityGroup(w http.ResponseWriter, r *http.Request
 
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE security_groups
-		SET rules_json = ?, policy_in = ?, policy_out = ?, updated_at = ?
-		WHERE owner_username = ? AND name = ?
+		SET rules_json = $1, policy_in = $2, policy_out = $3, updated_at = $4
+		WHERE owner_username = $5 AND name = $6
 	`, rulesJSON, policyIn, policyOut, now, current.Username, name)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
@@ -192,10 +192,10 @@ func (s *Server) handlePatchSecurityGroup(w http.ResponseWriter, r *http.Request
 		UPDATE vms
 		SET sync_state = 'pending',
 		    sync_error = NULL,
-		    updated_at = ?,
+		    updated_at = $1,
 		    version = version + 1
-		WHERE owner_username = ?
-		  AND security_group_name = ?
+		WHERE owner_username = $2
+		  AND security_group_name = $3
 		  AND deleted_at IS NULL
 		  AND managed = 1
 		  AND sync_state != 'deleting'
@@ -221,7 +221,7 @@ func (s *Server) handleDeleteSecurityGroup(w http.ResponseWriter, r *http.Reques
 	if err := s.db.QueryRowContext(r.Context(), `
 		SELECT COUNT(1)
 		FROM vms
-		WHERE owner_username = ? AND security_group_name = ? AND deleted_at IS NULL
+		WHERE owner_username = $1 AND security_group_name = $2 AND deleted_at IS NULL
 	`, current.Username, name).Scan(&refCount); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -232,7 +232,7 @@ func (s *Server) handleDeleteSecurityGroup(w http.ResponseWriter, r *http.Reques
 	}
 	res, err := s.db.ExecContext(r.Context(), `
 		DELETE FROM security_groups
-		WHERE owner_username = ? AND name = ?
+		WHERE owner_username = $1 AND name = $2
 	`, current.Username, name)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())

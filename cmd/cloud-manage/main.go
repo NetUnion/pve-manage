@@ -56,7 +56,7 @@ func runServe(logger *slog.Logger, args []string) error {
 		return err
 	}
 
-	dbConn, err := db.Open(runtime.DBPath)
+	dbConn, err := db.Open(runtime.DBURL)
 	if err != nil {
 		return err
 	}
@@ -101,14 +101,14 @@ func runWorker(logger *slog.Logger, args []string) error {
 	if err != nil {
 		return err
 	}
-	logger.Info("worker runtime loaded", "db", runtime.DBPath, "config", runtime.ConfigPath, "token", runtime.TokenPath)
+	logger.Info("worker runtime loaded", "db", runtime.DBURL, "config", runtime.ConfigPath, "token", runtime.TokenPath)
 
 	cfg, err := config.Load(runtime)
 	if err != nil {
 		return err
 	}
 
-	dbConn, err := db.Open(runtime.DBPath)
+	dbConn, err := db.Open(runtime.DBURL)
 	if err != nil {
 		return err
 	}
@@ -143,7 +143,7 @@ func runMigrate(logger *slog.Logger, args []string) error {
 	if _, err := config.Load(runtime); err != nil {
 		return err
 	}
-	dbConn, err := db.Open(runtime.DBPath)
+	dbConn, err := db.Open(runtime.DBURL)
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,7 @@ func runMigrate(logger *slog.Logger, args []string) error {
 		return err
 	}
 
-	logger.Info("database migrations applied", "db", runtime.DBPath)
+	logger.Info("database migrations applied", "db", runtime.DBURL)
 	return nil
 }
 
@@ -164,7 +164,7 @@ func parseRuntime(args []string) (config.Runtime, error) {
 
 	runtime := config.Runtime{}
 	fs.StringVar(&runtime.ListenAddr, "listen", ":8080", "HTTP listen address")
-	fs.StringVar(&runtime.DBPath, "db", "cloud-manage.sqlite3", "SQLite database path")
+	fs.StringVar(&runtime.DBURL, "db-url", "postgres://cloud-manage:cloud-manage@localhost:5432/cloud-manage?sslmode=disable", "PostgreSQL database URL")
 	fs.StringVar(&runtime.ConfigPath, "config", "config/config.yaml", "main config path")
 	fs.StringVar(&runtime.OIDCPath, "oidc", "config/oidc.yaml", "OIDC config path")
 	fs.StringVar(&runtime.TokenPath, "token", "config/token.yaml", "PVE token config path")

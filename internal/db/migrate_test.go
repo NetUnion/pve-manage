@@ -2,12 +2,17 @@ package db
 
 import (
 	"context"
-	"path/filepath"
+	"os"
 	"testing"
 )
 
 func TestMigrateAddsVMTaskAttemptCount(t *testing.T) {
-	database, err := Open(filepath.Join(t.TempDir(), "migration.sqlite3"))
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set, skipping PostgreSQL migration test")
+	}
+
+	database, err := Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17,22 +22,17 @@ func TestMigrateAddsVMTaskAttemptCount(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := database.Query(`PRAGMA table_info(vm_tasks)`)
+	rows, err := database.Query(`
+		SELECT column_name FROM information_schema.columns
+		WHERE table_name = 'vm_tasks' AND column_name = 'attempt_count'
+	`)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	found := false
 	for rows.Next() {
-		var cid, notNull, primaryKey int
-		var name, columnType string
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			t.Fatal(err)
-		}
-		if name == "attempt_count" {
-			found = true
-		}
+		found = true
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)

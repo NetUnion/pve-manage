@@ -164,7 +164,7 @@ func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) (int64, int64
 		    error = NULL,
 		    started_at = NULL,
 		    finished_at = NULL,
-		    updated_at = ?
+		    updated_at = $1
 		WHERE status = 'running'
 	`, now)
 	if err != nil {
@@ -177,7 +177,7 @@ func (w *Worker) recoverAbandonedRunningTasks(ctx context.Context) (int64, int64
 		    error = NULL,
 		    started_at = NULL,
 		    finished_at = NULL,
-		    updated_at = ?
+		    updated_at = $1
 		WHERE status = 'running'
 	`, now)
 	if err != nil {
@@ -196,9 +196,9 @@ func (w *Worker) recoverStaleRunningTasks(ctx context.Context) (int64, int64, er
 		    error = NULL,
 		    started_at = NULL,
 		    finished_at = NULL,
-		    updated_at = ?
+		    updated_at = $1
 		WHERE status = 'running'
-		  AND updated_at <= ?
+		  AND updated_at <= $2
 	`, now, cutoff)
 	if err != nil {
 		return 0, 0, err
@@ -210,9 +210,9 @@ func (w *Worker) recoverStaleRunningTasks(ctx context.Context) (int64, int64, er
 		    error = NULL,
 		    started_at = NULL,
 		    finished_at = NULL,
-		    updated_at = ?
+		    updated_at = $1
 		WHERE status = 'running'
-		  AND updated_at <= ?
+		  AND updated_at <= $2
 	`, now, cutoff)
 	if err != nil {
 		return maintenanceCount, 0, err
@@ -299,7 +299,7 @@ func (w *Worker) ensureMaintenanceTasks(ctx context.Context) error {
 	err := w.db.QueryRowContext(ctx, `
 		SELECT status, finished_at
 		FROM maintenance_tasks
-		WHERE kind = ?
+		WHERE kind = $1
 		ORDER BY id DESC
 		LIMIT 1
 	`, kind).Scan(&latestStatus, &finishedAt)
@@ -319,7 +319,7 @@ func (w *Worker) ensureMaintenanceTasks(ctx context.Context) error {
 	now := timestamp()
 	_, err = w.db.ExecContext(ctx, `
 		INSERT INTO maintenance_tasks(kind, payload_json, status, created_at, updated_at)
-		VALUES(?, ?, 'pending', ?, ?)
+		VALUES($1, $2, 'pending', $3, $4)
 	`, kind, "{}", now, now)
 	return err
 }
@@ -329,7 +329,7 @@ func (w *Worker) pendingMaintenanceTasks(ctx context.Context) ([]maintenanceTask
 		SELECT id, kind, payload_json, status, started_at, finished_at
 		FROM maintenance_tasks
 		WHERE status = 'pending'
-		   OR (status = 'failed' AND updated_at <= ?)
+		   OR (status = 'failed' AND updated_at <= $1)
 		ORDER BY id
 		LIMIT 10
 	`, time.Now().UTC().Add(-maintenanceTaskRetryAfter).Format(time.RFC3339Nano))
@@ -366,10 +366,10 @@ func (w *Worker) markMaintenanceTaskRunning(ctx context.Context, taskID int64) e
 		UPDATE maintenance_tasks
 		SET status = 'running',
 		    error = NULL,
-		    started_at = COALESCE(started_at, ?),
+		    started_at = COALESCE(started_at, $1),
 		    finished_at = NULL,
-		    updated_at = ?
-		WHERE id = ?
+		    updated_at = $2
+		WHERE id = $3
 	`, now, now, taskID)
 	return err
 }
@@ -378,8 +378,8 @@ func (w *Worker) markMaintenanceTaskDone(ctx context.Context, taskID int64) erro
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE maintenance_tasks
-		SET status = 'done', error = NULL, finished_at = COALESCE(finished_at, ?), updated_at = ?
-		WHERE id = ?
+		SET status = 'done', error = NULL, finished_at = COALESCE(finished_at, $1), updated_at = $2
+		WHERE id = $3
 	`, now, now, taskID)
 	return err
 }
@@ -388,8 +388,8 @@ func (w *Worker) markMaintenanceTaskFailed(ctx context.Context, taskID int64, me
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE maintenance_tasks
-		SET status = 'failed', error = ?, updated_at = ?, finished_at = COALESCE(finished_at, ?)
-		WHERE id = ?
+		SET status = 'failed', error = $1, updated_at = $2, finished_at = COALESCE(finished_at, $3)
+		WHERE id = $4
 	`, message, now, now, taskID)
 	return err
 }
@@ -400,7 +400,7 @@ func (w *Worker) purgeOldMaintenanceTasks(ctx context.Context) error {
 		DELETE FROM maintenance_tasks
 		WHERE status IN ('done', 'failed', 'canceled')
 		  AND finished_at IS NOT NULL
-		  AND finished_at < ?
+		  AND finished_at < $1
 	`, cutoff)
 	return err
 }
@@ -411,7 +411,7 @@ func (w *Worker) purgeOldTasks(ctx context.Context) error {
 		DELETE FROM vm_tasks
 		WHERE status IN ('done', 'failed', 'canceled')
 		  AND finished_at IS NOT NULL
-		  AND finished_at < ?
+		  AND finished_at < $1
 	`, cutoff); err != nil {
 		return err
 	}
@@ -421,7 +421,7 @@ func (w *Worker) purgeOldTasks(ctx context.Context) error {
 			SELECT id
 			FROM vms
 			WHERE deleted_at IS NOT NULL
-			  AND deleted_at < ?
+			  AND deleted_at < $1
 		)
 	`, cutoff)
 	return err
@@ -443,7 +443,7 @@ func (w *Worker) pendingTasks(ctx context.Context) ([]vmTaskRow, error) {
 		    vt.status = 'pending'
 		    OR (
 		      vt.status = 'failed'
-		      AND vt.attempt_count BETWEEN 1 AND ?
+		      AND vt.attempt_count BETWEEN 1 AND $1
 		    )
 		  )
 		  AND NOT EXISTS (
@@ -542,7 +542,7 @@ func (w *Worker) ensureExpiredDeleteTasks(ctx context.Context) error {
 		  AND v.task_queue_paused = 0
 		  AND v.delete_requested_at IS NOT NULL
 		  AND v.delete_execute_after IS NOT NULL
-		  AND v.delete_execute_after <= ?
+		  AND v.delete_execute_after <= $1
 		  AND NOT EXISTS (
 		      SELECT 1
 		      FROM vm_tasks vt
@@ -580,7 +580,7 @@ func (w *Worker) cancelSupersededTasksForDeletingVMs(ctx context.Context) error 
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
-		SET status = 'canceled', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+		SET status = 'canceled', updated_at = $1, finished_at = COALESCE(finished_at, $2)
 		WHERE kind <> 'delete'
 		  AND status NOT IN ('done', 'canceled')
 		  AND vm_id IN (
@@ -604,7 +604,7 @@ func (w *Worker) queueVMTask(ctx context.Context, vmID int64, kind string, paylo
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(seq), 0) + 1
 		FROM vm_tasks
-		WHERE vm_id = ?
+		WHERE vm_id = $1
 	`, vmID).Scan(&nextSeq); err != nil {
 		return err
 	}
@@ -615,7 +615,7 @@ func (w *Worker) queueVMTask(ctx context.Context, vmID int64, kind string, paylo
 	now := timestamp()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
-		VALUES(?,?,?,?, 'pending', ?, ?)
+		VALUES($1,$2,$3,$4, 'pending', $5, $6)
 	`, vmID, nextSeq, kind, string(payloadJSON), now, now); err != nil {
 		return err
 	}
@@ -704,10 +704,10 @@ func (w *Worker) markTaskRunning(ctx context.Context, taskID int64) error {
 		SET status = 'running',
 		    error = NULL,
 		    attempt_count = attempt_count + 1,
-		    started_at = COALESCE(started_at, ?),
+		    started_at = COALESCE(started_at, $1),
 		    finished_at = NULL,
-		    updated_at = ?
-		WHERE id = ?
+		    updated_at = $2
+		WHERE id = $3
 	`, now, now, taskID)
 	return err
 }
@@ -716,8 +716,8 @@ func (w *Worker) markTaskDone(ctx context.Context, taskID int64) error {
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
-		SET status = 'done', error = NULL, finished_at = COALESCE(finished_at, ?), updated_at = ?
-		WHERE id = ?
+		SET status = 'done', error = NULL, finished_at = COALESCE(finished_at, $1), updated_at = $2
+		WHERE id = $3
 	`, now, now, taskID)
 	return err
 }
@@ -726,8 +726,8 @@ func (w *Worker) markTaskFailed(ctx context.Context, taskID int64, message strin
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
-		SET status = 'failed', error = ?, updated_at = ?, finished_at = COALESCE(finished_at, ?)
-		WHERE id = ?
+		SET status = 'failed', error = $1, updated_at = $2, finished_at = COALESCE(finished_at, $3)
+		WHERE id = $4
 	`, message, now, now, taskID)
 	return err
 }
@@ -1642,8 +1642,8 @@ func (w *Worker) replaceVMMetrics(ctx context.Context, vmID int64, metrics []vmM
 	}
 	_, err = w.db.ExecContext(ctx, `
 		UPDATE vms
-		SET metrics_json = ?, updated_at = ?
-		WHERE id = ?
+		SET metrics_json = $1, updated_at = $2
+		WHERE id = $3
 	`, string(data), now, vmID)
 	return err
 }
@@ -1697,7 +1697,7 @@ func (w *Worker) recordNodeMetric(ctx context.Context, clusterKey, node string, 
 	memRatio := nodeMemRatio(status)
 	_, err := w.db.ExecContext(ctx, `
 		INSERT INTO node_metrics(cluster_key, node, cpu_ratio, mem_ratio, recorded_at, created_at)
-		VALUES(?,?,?,?,?,?)
+		VALUES($1,$2,$3,$4,$5,$6)
 	`, clusterKey, node, cpuRatio, memRatio, now, now)
 	return err
 }
@@ -1707,7 +1707,7 @@ func (w *Worker) loadSecurityGroupConfig(ctx context.Context, owner, name string
 	if err := w.db.QueryRowContext(ctx, `
 		SELECT rules_json, policy_in, policy_out
 		FROM security_groups
-		WHERE owner_username = ? AND name = ?
+		WHERE owner_username = $1 AND name = $2
 	`, owner, name).Scan(&raw, &policyIn, &policyOut); err != nil {
 		return securityGroupConfig{}, err
 	}
@@ -1727,12 +1727,12 @@ func (w *Worker) upsertTemplate(ctx context.Context, tpl templateRecord, now str
 	err := w.db.QueryRowContext(ctx, `
 		SELECT id
 		FROM templates
-		WHERE cluster_key = ? AND template_vmid = ?
+		WHERE cluster_key = $1 AND template_vmid = $2
 	`, tpl.ClusterKey, tpl.TemplateVMID).Scan(&id)
 	if err == sql.ErrNoRows {
 		_, err = w.db.ExecContext(ctx, `
 			INSERT INTO templates(cluster_key, template_vmid, name, description, os_type, real_status_json, last_seen_at, created_at, updated_at)
-			VALUES(?,?,?,?,?,?,?,?,?)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		`, tpl.ClusterKey, tpl.TemplateVMID, tpl.Name, tpl.Description, tpl.OSType, tpl.RealStatus, now, now, now)
 		return err
 	}
@@ -1741,8 +1741,8 @@ func (w *Worker) upsertTemplate(ctx context.Context, tpl templateRecord, now str
 	}
 	_, err = w.db.ExecContext(ctx, `
 		UPDATE templates
-		SET name = ?, description = ?, os_type = ?, real_status_json = ?, last_seen_at = ?, updated_at = ?
-		WHERE id = ?
+		SET name = $1, description = $2, os_type = $3, real_status_json = $4, last_seen_at = $5, updated_at = $6
+		WHERE id = $7
 	`, tpl.Name, tpl.Description, tpl.OSType, tpl.RealStatus, now, now, id)
 	return err
 }
@@ -1753,7 +1753,7 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 	err := w.db.QueryRowContext(ctx, `
 		SELECT id, managed
 		FROM vms
-		WHERE cluster_key = ? AND vmid = ? AND deleted_at IS NULL
+		WHERE cluster_key = $1 AND vmid = $2 AND deleted_at IS NULL
 	`, clusterKey, resource.VMID).Scan(&id, &managed)
 	if err != nil && err != sql.ErrNoRows {
 		return err
@@ -1793,8 +1793,8 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 		cfgJSON, _ := json.Marshal(cfg)
 		_, err = w.db.ExecContext(ctx, `
 			UPDATE vms
-			SET vmname = ?, ip = ?, node = ?, target_node = ?, config_json = ?, real_status_json = ?, sync_state = 'unmanaged', sync_error = NULL, updated_at = ?
-			WHERE id = ?
+			SET vmname = $1, ip = $2, node = $3, target_node = $4, config_json = $5, real_status_json = $6, sync_state = 'unmanaged', sync_error = NULL, updated_at = $7
+			WHERE id = $8
 		`, name, stringFromMap(cfg, "ip", ""), resource.Node, resource.Node, string(cfgJSON), string(real), now, id)
 		return err
 	}
@@ -1809,7 +1809,7 @@ func (w *Worker) upsertUnmanagedVM(ctx context.Context, clusterKey string, resou
 			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
 			config_json, prefer_status_json, real_status_json, sync_state, version,
 			created_at, updated_at, managed
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 		`, "__pve_unmanaged__", clusterKey, resource.VMID, name, stringFromMap(cfg, "ip", ""), resource.Node, resource.Node, "", "[]", "[]", "", 0, string(cfgJSON), string(prefer), string(real), "unmanaged", 1, now, now, 0)
 	return err
 }
@@ -1822,7 +1822,7 @@ func (w *Worker) markMissingUnmanagedVMsDeleted(ctx context.Context, clusterKey 
 	rows, err := w.db.QueryContext(ctx, `
 		SELECT id, vmid, real_status_json
 		FROM vms
-		WHERE cluster_key = ?
+		WHERE cluster_key = $1
 		  AND managed = 0
 		  AND deleted_at IS NULL
 	`, clusterKey)
@@ -1860,12 +1860,12 @@ func (w *Worker) markMissingUnmanagedVMsDeleted(ctx context.Context, clusterKey 
 		data, _ := json.Marshal(real)
 		if _, err := w.db.ExecContext(ctx, `
 			UPDATE vms
-			SET deleted_at = ?,
-			    real_status_json = ?,
+			SET deleted_at = $1,
+			    real_status_json = $2,
 			    sync_state = 'synced',
 			    sync_error = NULL,
-			    updated_at = ?
-			WHERE id = ?
+			    updated_at = $3
+			WHERE id = $4
 			  AND managed = 0
 			  AND deleted_at IS NULL
 		`, now, string(data), now, vm.id); err != nil {
@@ -1879,8 +1879,8 @@ func (w *Worker) markSynced(ctx context.Context, id int64, real map[string]any) 
 	data, _ := json.Marshal(real)
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vms
-		SET real_status_json = ?, sync_state = 'synced', sync_error = NULL, updated_at = ?
-		WHERE id = ?
+		SET real_status_json = $1, sync_state = 'synced', sync_error = NULL, updated_at = $2
+		WHERE id = $3
 	`, string(data), timestamp(), id)
 	return err
 }
@@ -1890,7 +1890,7 @@ func (w *Worker) markPasswordSynced(ctx context.Context, id int64) error {
 	if err := w.db.QueryRowContext(ctx, `
 		SELECT config_json
 		FROM vms
-		WHERE id = ?
+		WHERE id = $1
 	`, id).Scan(&raw); err != nil {
 		return err
 	}
@@ -1902,8 +1902,8 @@ func (w *Worker) markPasswordSynced(ctx context.Context, id int64) error {
 	}
 	_, err = w.db.ExecContext(ctx, `
 		UPDATE vms
-		SET config_json = ?, updated_at = ?
-		WHERE id = ?
+		SET config_json = $1, updated_at = $2
+		WHERE id = $3
 	`, string(data), timestamp(), id)
 	return err
 }
@@ -1914,8 +1914,8 @@ func (w *Worker) markNode(ctx context.Context, id int64, node string) error {
 	}
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vms
-		SET node = ?, updated_at = ?
-		WHERE id = ?
+		SET node = $1, updated_at = $2
+		WHERE id = $3
 	`, node, timestamp(), id)
 	return err
 }
@@ -1924,8 +1924,8 @@ func (w *Worker) markDeletePending(ctx context.Context, id int64, real map[strin
 	data, _ := json.Marshal(real)
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vms
-		SET real_status_json = ?, sync_state = 'deleting', sync_error = NULL, updated_at = ?
-		WHERE id = ?
+		SET real_status_json = $1, sync_state = 'deleting', sync_error = NULL, updated_at = $2
+		WHERE id = $3
 	`, string(data), timestamp(), id)
 	return err
 }
@@ -1933,8 +1933,8 @@ func (w *Worker) markDeletePending(ctx context.Context, id int64, real map[strin
 func (w *Worker) markFailed(ctx context.Context, id int64, message string) error {
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vms
-		SET sync_state = 'failed', sync_error = ?, updated_at = ?
-		WHERE id = ?
+		SET sync_state = 'failed', sync_error = $1, updated_at = $2
+		WHERE id = $3
 	`, message, timestamp(), id)
 	return err
 }
@@ -1948,8 +1948,8 @@ func (w *Worker) markDeleted(ctx context.Context, id int64) error {
 	})
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vms
-		SET deleted_at = ?, real_status_json = ?, sync_state = 'synced', sync_error = NULL, updated_at = ?
-		WHERE id = ?
+		SET deleted_at = $1, real_status_json = $2, sync_state = 'synced', sync_error = NULL, updated_at = $3
+		WHERE id = $4
 	`, now, string(real), now, id)
 	return err
 }
@@ -1958,8 +1958,8 @@ func (w *Worker) cancelOutstandingVMTasks(ctx context.Context, vmID int64) error
 	now := timestamp()
 	_, err := w.db.ExecContext(ctx, `
 		UPDATE vm_tasks
-		SET status = 'canceled', updated_at = ?
-		WHERE vm_id = ?
+		SET status = 'canceled', updated_at = $1
+		WHERE vm_id = $2
 		  AND status NOT IN ('done', 'canceled')
 	`, now, vmID)
 	return err

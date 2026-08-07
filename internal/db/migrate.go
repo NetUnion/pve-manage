@@ -20,11 +20,11 @@ var migrations = []Migration{
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
-    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
     email TEXT,
     name TEXT,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS security_groups (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     owner_username TEXT NOT NULL,
     name TEXT NOT NULL,
     rules_json TEXT NOT NULL,
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS security_groups (
 );
 
 CREATE TABLE IF NOT EXISTS templates (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     cluster_key TEXT NOT NULL,
     template_vmid INTEGER NOT NULL,
     name TEXT NOT NULL,
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS templates (
 );
 
 CREATE TABLE IF NOT EXISTS vms (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     owner_username TEXT NOT NULL,
     cluster_key TEXT NOT NULL,
     vmid INTEGER NOT NULL,
@@ -101,7 +101,7 @@ ALTER TABLE vms ADD COLUMN managed INTEGER NOT NULL DEFAULT 1;
 		Name:    "active_vm_unique_index",
 		SQL: `
 CREATE TABLE vms_new (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     owner_username TEXT NOT NULL,
     cluster_key TEXT NOT NULL,
     vmid INTEGER NOT NULL,
@@ -151,7 +151,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vms_active_cluster_vmid
 		Name:    "ssh_keys_table",
 		SQL: `
 CREATE TABLE IF NOT EXISTS ssh_keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     owner_username TEXT NOT NULL,
     name TEXT NOT NULL,
     public_key TEXT NOT NULL,
@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS ssh_keys (
 ALTER TABLE vms ADD COLUMN node TEXT;
 
 CREATE TABLE IF NOT EXISTS node_metrics (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     cluster_key TEXT NOT NULL,
     node TEXT NOT NULL,
     cpu_ratio REAL NOT NULL,
@@ -198,7 +198,7 @@ SELECT 1;
 		Name:    "vm_tasks_table",
 		SQL: `
 CREATE TABLE IF NOT EXISTS vm_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     vm_id INTEGER NOT NULL,
     seq INTEGER NOT NULL,
     kind TEXT NOT NULL,
@@ -221,7 +221,7 @@ CREATE INDEX IF NOT EXISTS idx_vm_tasks_vm_status_seq
 		Name:    "maintenance_tasks_table",
 		SQL: `
 CREATE TABLE IF NOT EXISTS maintenance_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id BIGSERIAL PRIMARY KEY,
     kind TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     status TEXT NOT NULL,
@@ -296,7 +296,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
-		applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 	);`); err != nil {
 		return err
 	}
@@ -324,7 +324,7 @@ type migrationQuerier interface {
 }
 
 func applyMigration(ctx context.Context, conn *sql.Conn, migration Migration) error {
-	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+	if _, err := conn.ExecContext(ctx, `BEGIN`); err != nil {
 		return err
 	}
 	committed := false
@@ -351,7 +351,7 @@ func applyMigration(ctx context.Context, conn *sql.Conn, migration Migration) er
 	}
 
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO schema_migrations(version, name) VALUES(?, ?)`,
+		`INSERT INTO schema_migrations(version, name) VALUES($1, $2)`,
 		migration.Version,
 		migration.Name,
 	); err != nil {
@@ -367,7 +367,7 @@ func applyMigration(ctx context.Context, conn *sql.Conn, migration Migration) er
 
 func migrationApplied(ctx context.Context, db migrationQuerier, version int) (bool, error) {
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations WHERE version = ?`, version).Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_migrations WHERE version = $1`, version).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil

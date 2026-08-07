@@ -123,8 +123,8 @@ func queueVMPowerTaskTx(ctx context.Context, tx *sql.Tx, vm *vmSummary, action s
 	now := timestamp()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE vms
-		SET prefer_status_json = ?, sync_state = 'pending', sync_error = NULL, updated_at = ?
-		WHERE id = ?
+		SET prefer_status_json = $1, sync_state = 'pending', sync_error = NULL, updated_at = $2
+		WHERE id = $3
 	`, string(preferBytes), now, vm.ID); err != nil {
 		return err
 	}
@@ -366,7 +366,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	if err := s.db.QueryRowContext(r.Context(), `
 		SELECT id, cluster_key, template_vmid, name, description, os_type, real_status_json, last_seen_at, created_at, updated_at
 		FROM templates
-		WHERE cluster_key = ? AND template_vmid = ?
+		WHERE cluster_key = $1 AND template_vmid = $2
 	`, req.ClusterKey, req.TemplateVMID).Scan(
 		&template.ID,
 		&template.ClusterKey,
@@ -421,7 +421,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(r.Context(), "BEGIN IMMEDIATE"); err != nil {
+	if _, err := conn.ExecContext(r.Context(), "BEGIN"); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -513,19 +513,16 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		uestcRestricted = 1
 	}
 
-	res, err := conn.ExecContext(r.Context(), `
+	var id int64
+	err = conn.QueryRowContext(r.Context(), `
 		INSERT INTO vms(
 			owner_username, cluster_key, vmid, vmname, ip, node, target_node, password,
 			sshkeys_json, shared_usernames_json, security_group_name, uestc_restricted,
 			config_json, prefer_status_json, real_status_json, sync_state, version,
 			created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	`, current.Username, req.ClusterKey, vmid, req.VMName, ip, "", targetNode, password, sshkeysJSON, sharedJSON, req.SecurityGroupName, uestcRestricted, string(configJSON), string(preferJSON), string(realJSON), "pending", 1, now, now)
-	if err != nil {
-		s.jsonError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	id, err := res.LastInsertId()
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+		RETURNING id
+	`, current.Username, req.ClusterKey, vmid, req.VMName, ip, "", targetNode, password, sshkeysJSON, sharedJSON, req.SecurityGroupName, uestcRestricted, string(configJSON), string(preferJSON), string(realJSON), "pending", 1, now, now).Scan(&id)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -972,10 +969,10 @@ func (s *Server) handlePatchVM(w http.ResponseWriter, r *http.Request) {
 
 	res, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET owner_username = ?, vmname = ?, ip = ?, node = COALESCE(node, ?), password = ?, sshkeys_json = ?, shared_usernames_json = ?, security_group_name = ?,
-		    uestc_restricted = ?, quota_exempt = ?, config_json = ?, prefer_status_json = ?, sync_state = 'pending',
-		    sync_error = NULL, version = version + 1, updated_at = ?
-		WHERE id = ?
+		SET owner_username = $1, vmname = $2, ip = $3, node = COALESCE(node, $4), password = $5, sshkeys_json = $6, shared_usernames_json = $7, security_group_name = $8,
+		    uestc_restricted = $9, quota_exempt = $10, config_json = $11, prefer_status_json = $12, sync_state = 'pending',
+		    sync_error = NULL, version = version + 1, updated_at = $13
+		WHERE id = $14
 	`, vm.OwnerUsername, vm.VMName, vm.IP, vm.Node, vm.Password, sshKeysJSON, sharedJSON, vm.SecurityGroupName, boolToInt(vm.UESTCRestricted), boolToInt(vm.QuotaExempt), string(cfgBytes), string(preferBytes), now, vm.ID)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
@@ -1133,9 +1130,9 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET prefer_status_json = ?, sync_state = 'deleting', sync_error = NULL,
-		    delete_requested_at = ?, delete_execute_after = ?, updated_at = ?, version = version + 1
-		WHERE id = ?
+		SET prefer_status_json = $1, sync_state = 'deleting', sync_error = NULL,
+		    delete_requested_at = $2, delete_execute_after = $3, updated_at = $4, version = version + 1
+		WHERE id = $5
 	`, string(preferBytes), nowStr, execStr, nowStr, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1210,17 +1207,17 @@ func (s *Server) handleRestoreVM(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET prefer_status_json = ?, sync_state = 'pending', sync_error = NULL,
-		    delete_requested_at = NULL, delete_execute_after = NULL, updated_at = ?, version = version + 1
-		WHERE id = ?
+		SET prefer_status_json = $1, sync_state = 'pending', sync_error = NULL,
+		    delete_requested_at = NULL, delete_execute_after = NULL, updated_at = $2, version = version + 1
+		WHERE id = $3
 	`, string(preferBytes), nowStr, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vm_tasks
-		SET status = 'canceled', updated_at = ?
-		WHERE vm_id = ? AND kind = 'delete' AND status IN ('pending', 'running')
+		SET status = 'canceled', updated_at = $1
+		WHERE vm_id = $2 AND kind = 'delete' AND status IN ('pending', 'running')
 	`, nowStr, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1292,10 +1289,10 @@ func (s *Server) handleDeleteNowVM(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET prefer_status_json = ?, sync_state = 'deleting', sync_error = NULL,
-		    delete_requested_at = COALESCE(delete_requested_at, ?),
-		    delete_execute_after = ?, updated_at = ?, version = version + 1
-		WHERE id = ?
+		SET prefer_status_json = $1, sync_state = 'deleting', sync_error = NULL,
+		    delete_requested_at = COALESCE(delete_requested_at, $2),
+		    delete_execute_after = $3, updated_at = $4, version = version + 1
+		WHERE id = $5
 	`, string(preferBytes), nowStr, nowStr, nowStr, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1347,9 +1344,9 @@ func (s *Server) handlePauseVMTasks(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.db.ExecContext(r.Context(), `
 		UPDATE vms
 		SET task_queue_paused = 1,
-		    updated_at = ?,
+		    updated_at = $1,
 		    version = version + 1
-		WHERE id = ?
+		WHERE id = $2
 	`, now, id); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1389,9 +1386,9 @@ func (s *Server) handleResumeVMTasks(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.db.ExecContext(r.Context(), `
 		UPDATE vms
 		SET task_queue_paused = 0,
-		    updated_at = ?,
+		    updated_at = $1,
 		    version = version + 1
-		WHERE id = ?
+		WHERE id = $2
 	`, now, id); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1458,8 +1455,8 @@ func (s *Server) handleRetryVMTask(w http.ResponseWriter, r *http.Request) {
 		    error = NULL,
 		    started_at = NULL,
 		    finished_at = NULL,
-		    updated_at = ?
-		WHERE id = ? AND vm_id = ? AND status = 'failed'
+		    updated_at = $1
+		WHERE id = $2 AND vm_id = $3 AND status = 'failed'
 	`, now, taskID, vmID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1468,9 +1465,9 @@ func (s *Server) handleRetryVMTask(w http.ResponseWriter, r *http.Request) {
 		UPDATE vms
 		SET sync_state = CASE WHEN delete_requested_at IS NOT NULL THEN 'deleting' ELSE 'pending' END,
 		    sync_error = NULL,
-		    updated_at = ?,
+		    updated_at = $1,
 		    version = version + 1
-		WHERE id = ?
+		WHERE id = $2
 	`, now, vmID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1716,11 +1713,11 @@ func (s *Server) handleAdminAdoptVM(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `
 		UPDATE vms
-		SET owner_username = ?, vmname = ?, ip = ?, password = ?, sshkeys_json = ?, shared_usernames_json = ?,
-		    security_group_name = ?, uestc_restricted = ?, quota_exempt = ?, config_json = ?, prefer_status_json = ?, real_status_json = ?,
+		SET owner_username = $1, vmname = $2, ip = $3, password = $4, sshkeys_json = $5, shared_usernames_json = $6,
+		    security_group_name = $7, uestc_restricted = $8, quota_exempt = $9, config_json = $10, prefer_status_json = $11, real_status_json = $12,
 		    managed = 1, sync_state = 'pending', sync_error = NULL, delete_requested_at = NULL,
-		    delete_execute_after = NULL, updated_at = ?, version = version + 1
-		WHERE id = ?
+		    delete_execute_after = NULL, updated_at = $13, version = version + 1
+		WHERE id = $14
 	`, req.OwnerUsername, req.VMName, req.IP, password, mustJSON(sshKeys), mustJSON(sharedUsernames),
 		req.SecurityGroupName, boolToInt(uestcRestricted), 0, string(cfgJSON), string(preferJSON), string(realJSON), now, vm.ID); err != nil {
 		s.jsonError(w, http.StatusInternalServerError, err.Error())

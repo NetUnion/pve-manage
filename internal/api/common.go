@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/NetUnion/pve-manage/internal/config"
 	"github.com/NetUnion/pve-manage/internal/model"
@@ -266,7 +269,7 @@ func (s *Server) loadVMTasks(ctx context.Context, vmID int64) ([]vmTaskSummary, 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, vm_id, seq, kind, payload_json, status, error, attempt_count, created_at, updated_at, started_at, finished_at
 		FROM vm_tasks
-		WHERE vm_id = ? AND status <> 'canceled'
+		WHERE vm_id = $1 AND status <> 'canceled'
 		ORDER BY seq, id
 	`, vmID)
 	if err != nil {
@@ -305,7 +308,7 @@ func (s *Server) loadAllVMTasks(ctx context.Context, includeCompleted bool) ([]a
 		FROM vm_tasks vt
 		JOIN vms v ON v.id = vt.vm_id
 		WHERE vt.status <> 'canceled'
-		  AND (? = 1 OR vt.status <> 'done')
+		  AND ($1 = 1 OR vt.status <> 'done')
 		ORDER BY vt.created_at DESC, vt.id DESC
 	`, boolToInt(includeCompleted))
 	if err != nil {
@@ -378,7 +381,7 @@ func (s *Server) loadVMTask(ctx context.Context, vmID, taskID int64) (*vmTaskSum
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, vm_id, seq, kind, payload_json, status, error, attempt_count, created_at, updated_at, started_at, finished_at
 		FROM vm_tasks
-		WHERE vm_id = ? AND id = ?
+		WHERE vm_id = $1 AND id = $2
 	`, vmID, taskID)
 
 	var item vmTaskSummary
@@ -405,7 +408,7 @@ func queueVMTaskTx(ctx context.Context, tx *sql.Tx, vmID int64, kind string, pay
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(seq), 0) + 1
 		FROM vm_tasks
-		WHERE vm_id = ?
+		WHERE vm_id = $1
 	`, vmID).Scan(&nextSeq); err != nil {
 		return err
 	}
@@ -413,7 +416,7 @@ func queueVMTaskTx(ctx context.Context, tx *sql.Tx, vmID int64, kind string, pay
 	now := timestamp()
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
-		VALUES(?,?,?,?, 'pending', ?, ?)
+		VALUES($1,$2,$3,$4, 'pending', $5, $6)
 	`, vmID, nextSeq, kind, payloadJSON, now, now)
 	return err
 }
@@ -422,8 +425,8 @@ func cancelVMTasksTx(ctx context.Context, tx *sql.Tx, vmID int64) error {
 	now := timestamp()
 	_, err := tx.ExecContext(ctx, `
 		UPDATE vm_tasks
-		SET status = 'canceled', updated_at = ?, finished_at = COALESCE(finished_at, ?)
-		WHERE vm_id = ?
+		SET status = 'canceled', updated_at = $1, finished_at = COALESCE(finished_at, $2)
+		WHERE vm_id = $3
 		  AND status NOT IN ('done', 'canceled')
 	`, now, now, vmID)
 	return err
@@ -434,7 +437,7 @@ func queueVMTaskConn(ctx context.Context, conn *sql.Conn, vmID int64, kind strin
 	if err := conn.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(seq), 0) + 1
 		FROM vm_tasks
-		WHERE vm_id = ?
+		WHERE vm_id = $1
 	`, vmID).Scan(&nextSeq); err != nil {
 		return err
 	}
@@ -442,7 +445,7 @@ func queueVMTaskConn(ctx context.Context, conn *sql.Conn, vmID int64, kind strin
 	now := timestamp()
 	_, err := conn.ExecContext(ctx, `
 		INSERT INTO vm_tasks(vm_id, seq, kind, payload_json, status, created_at, updated_at)
-		VALUES(?,?,?,?, 'pending', ?, ?)
+		VALUES($1,$2,$3,$4, 'pending', $5, $6)
 	`, vmID, nextSeq, kind, payloadJSON, now, now)
 	return err
 }
@@ -582,13 +585,15 @@ func randomPassword(n int) string {
 	return string(out)
 }
 
-func isSQLiteUniqueConstraintError(err error) bool {
+func isUniqueConstraintError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "UNIQUE constraint failed: vms.cluster_key, vms.vmid") ||
-		strings.Contains(msg, "UNIQUE constraint failed")
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23505"
+	}
+	return strings.Contains(err.Error(), "duplicate key value violates unique constraint")
 }
 
 func boolToInt(v bool) int {
@@ -637,7 +642,7 @@ func (s *Server) loadUserRow(ctx context.Context, username string) (*model.User,
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, username, email, name, groups_json, is_active, is_admin, created_at, updated_at, last_login_at
 		FROM users
-		WHERE username = ?
+		WHERE username = $1
 	`, username).Scan(
 		&user.ID,
 		&user.Username,
@@ -691,7 +696,7 @@ func (s *Server) listUserVMUsage(ctx context.Context, username string) (count, c
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT config_json
 		FROM vms
-		WHERE owner_username = ? AND deleted_at IS NULL AND managed = 1 AND quota_exempt = 0
+		WHERE owner_username = $1 AND deleted_at IS NULL AND managed = 1 AND quota_exempt = 0
 	`, username)
 	if err != nil {
 		return 0, 0, 0, 0, err
@@ -732,7 +737,7 @@ func (s *Server) countUserSecurityGroups(ctx context.Context, username string) (
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(1)
 		FROM security_groups
-		WHERE owner_username = ?
+		WHERE owner_username = $1
 	`, username).Scan(&count); err != nil {
 		return 0, err
 	}
@@ -744,7 +749,7 @@ func (s *Server) clusterVMCounts(ctx context.Context, clusterKey string) (int, e
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(1)
 		FROM vms
-		WHERE cluster_key = ? AND deleted_at IS NULL
+		WHERE cluster_key = $1 AND deleted_at IS NULL
 	`, clusterKey).Scan(&count); err != nil {
 		return 0, err
 	}
@@ -759,7 +764,7 @@ func nextClusterVMID(ctx context.Context, q vmIDQuerier, clusterKey string, star
 	rows, err := q.QueryContext(ctx, `
 		SELECT vmid
 		FROM vms
-		WHERE cluster_key = ? AND deleted_at IS NULL
+		WHERE cluster_key = $1 AND deleted_at IS NULL
 		ORDER BY vmid
 	`, clusterKey)
 	if err != nil {
@@ -862,12 +867,12 @@ func (s *Server) nodeStaticAllocation(ctx context.Context, q vmAllocationQuerier
 	rows, err := q.QueryContext(ctx, `
 		SELECT config_json
 		FROM vms
-		WHERE cluster_key = ?
+		WHERE cluster_key = $1
 		  AND deleted_at IS NULL
 		  AND managed = 1
 		  AND (
-		    node = ?
-		    OR (COALESCE(node, '') = '' AND target_node = ?)
+		    node = $2
+		    OR (COALESCE(node, '') = '' AND target_node = $3)
 		  )
 	`, clusterKey, node, node)
 	if err != nil {
@@ -962,7 +967,7 @@ func loadVMRow(ctx context.Context, q vmRowQuerier, id int64) (*vmSummary, error
 		       security_group_name, uestc_restricted, quota_exempt, managed, task_queue_paused, config_json, prefer_status_json, real_status_json,
 		       sync_state, sync_error, version, created_at, updated_at, deleted_at, delete_requested_at, delete_execute_after, metrics_json
 		FROM vms
-		WHERE id = ?
+		WHERE id = $1
 	`, id)
 
 	var item vmSummary
@@ -1038,7 +1043,7 @@ func (s *Server) loadSecurityGroupRow(ctx context.Context, owner, name string) (
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, owner_username, name, rules_json, policy_in, policy_out, created_at, updated_at
 		FROM security_groups
-		WHERE owner_username = ? AND name = ?
+		WHERE owner_username = $1 AND name = $2
 	`, owner, name)
 
 	var item securityGroupSummary
@@ -1056,7 +1061,7 @@ func (s *Server) loadTemplateRow(ctx context.Context, clusterKey string, templat
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, cluster_key, template_vmid, name, description, os_type, real_status_json, last_seen_at, created_at, updated_at
 		FROM templates
-		WHERE cluster_key = ? AND template_vmid = ?
+		WHERE cluster_key = $1 AND template_vmid = $2
 	`, clusterKey, templateVMID)
 
 	var item templateSummary
@@ -1083,7 +1088,7 @@ func (s *Server) loadSSHKeyRow(ctx context.Context, ownerUsername string, id int
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, owner_username, name, public_key, created_at, updated_at
 		FROM ssh_keys
-		WHERE owner_username = ? AND id = ?
+		WHERE owner_username = $1 AND id = $2
 	`, ownerUsername, id)
 
 	var item sshKeySummary
@@ -1097,7 +1102,7 @@ func (s *Server) loadSSHKeyRows(ctx context.Context, ownerUsername string) ([]ss
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, owner_username, name, public_key, created_at, updated_at
 		FROM ssh_keys
-		WHERE owner_username = ?
+		WHERE owner_username = $1
 		ORDER BY name, id
 	`, ownerUsername)
 	if err != nil {
@@ -1184,7 +1189,7 @@ func (s *Server) loadSSHKeyRowAny(ctx context.Context, id int64) (*sshKeySummary
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, owner_username, name, public_key, created_at, updated_at
 		FROM ssh_keys
-		WHERE id = ?
+		WHERE id = $1
 	`, id)
 
 	var item sshKeySummary
